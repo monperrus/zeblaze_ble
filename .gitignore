@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 *.egg-info/
 zeblaze-capture.jsonl
+JOURNAL.md
