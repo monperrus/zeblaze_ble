@@ -12,7 +12,7 @@ for the full protocol writeup, and `../NOTES.md` /
 the originally-planned encryption-key extraction (rooting a phone, pulling
 `com.zhapp.zeblazefit`'s app storage) turned out to be unnecessary.
 
-`battery`, `fitness`, `realtime`, `heartrate`, and `notify` perform protocol
+`battery`, `fitness`, `realtime`, `heartrate`, `notify`, and `workout` perform protocol
 writes. The remaining commands scan for the watch, verify its GATT layout,
 subscribe to its notification channels, and save received packets as JSON
 Lines for protocol work.
@@ -179,15 +179,57 @@ guess. See `zeblaze_ble/protocol.md` for the full method and the verified
 example bytes, and `android-observations.md` for the APK-pull/decompile
 mechanics.
 
-**Known limitation, confirmed live**: the watch acks this command as
-successful every time, but does **not** display the `--sender`/`--text`
-content — it shows a fixed system prompt instead ("please connect the BT in
-the phone's setting"), for all three `--type` values. Likely needs a
-classic-Bluetooth (BR/EDR) pairing alongside the BLE link, which this tool
-has never established — see protocol.md's "Push notification" section for
-the detail and the leading hypothesis. Useful today for verifying the wire
-protocol and getting an ack; not yet useful for actually notifying anyone.
+**Known limitation, confirmed live, unresolved**: the watch acks this
+command as successful every time, but a bare connection's notification is
+not reliably displayed — the watch shows a fixed system prompt instead
+("please connect the BT in the phone's setting"). Staying BLE-only (no
+classic-Bluetooth pairing) per project preference, `send_notification` now
+also sends `VERIFY_USER_NUMBER` first, matching what the real app always
+does on connect and this tool previously skipped — this measurably changes
+the watch's behavior but hasn't yet reliably produced the intended display
+across repeated trials. See protocol.md's "Push notification" section,
+"BLE-only fix attempt" subsection, for the exact trials and results, and
+`../TODO.md` for next steps. Useful today for verifying the wire protocol
+and getting an ack; not yet reliable for actually notifying anyone.
 
 Live example (2026-08-29): `zeblaze-ble notify` sent a `message` type
 notification and got back `{"response_hex": "08b201a00600"}` — the generic
 ack shape (`{1: 178, 100: 0}`, `100: 0` = success).
+
+## Workout data: steps, GPS track, heart rate (writes)
+
+```bash
+zeblaze-ble workout <ADDRESS> --i-understand-this-writes
+```
+
+Fetches whatever workout data the watch currently has queued: a summary
+(distance, duration, calories, steps, avg/max/min heart rate) and a full
+GPS track (timestamp + longitude + latitude per point). Reverse-engineered
+from a real ~24-minute GPS-tracked walk synced from the watch — every GPS
+point (561/561) and every summary field (7/7) matched the phone's own
+database exactly. Full protocol detail: `zeblaze_ble/protocol.md`'s
+"Workout data" section; how the capture was obtained:
+`../android-observations.md`.
+
+This is the tool's first command to use a **third** GATT channel
+(`16186f03`) and to drain a bulk multi-round transfer rather than a single
+request/response — see protocol.md for why that needed a different
+approach (concatenate rounds until the channel goes quiet, then split by
+scanning for known entry-id byte prefixes, rather than trying to track
+exact round/entry boundaries).
+
+Returns an empty `entries` list if nothing is currently queued — per this
+protocol's established single-consume-queue behavior (see the "Fitness
+data" section), a workout already fetched+confirmed by the official app
+won't be offered again. Per-point sensor data (heart rate readings taken
+during the workout, not just the summary) is fetched but not decoded yet
+(`point_data_raw_hex` in the output) — see `../TODO.md`.
+
+Live-tested 2026-08-29: the full command sequence ran successfully against
+the real watch end to end (no errors), but returned zero entries because
+the one available workout had already been synced by the official app
+during the capture this was built from. The parsing itself is verified
+exactly against that captured data (see protocol.md), but the multi-round
+activity-channel drain hasn't yet been exercised against an actual
+in-progress live transfer — that needs a fresh, not-yet-synced workout to
+test. If you have one queued, this is the next thing worth re-running.

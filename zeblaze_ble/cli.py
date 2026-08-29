@@ -18,6 +18,7 @@ from .gatttool_transport import (
     request_current_heart_rate,
     request_device_info,
     request_fitness_data,
+    request_workout_data,
     send_notification,
 )
 from .linux_gatt import inspect as inspect_gatttool
@@ -100,6 +101,12 @@ def parser() -> argparse.ArgumentParser:
     notify_command.add_argument("--text", default="", help="messageText: body text (ignored for --type call)")
     notify_command.add_argument("--phone", default="", help="phoneNumber (relevant for --type call/miss_call)")
     notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    workout_command = commands.add_parser(
+        "workout",
+        help="fetch queued workout data (summary, GPS track) from the watch (performs protocol writes)",
+    )
+    workout_command.add_argument("address")
+    workout_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     return command_parser
 
 
@@ -171,6 +178,18 @@ async def run(arguments: argparse.Namespace) -> int:
             arguments.address, notification_type, arguments.phone, arguments.sender, arguments.text
         )
         print(json.dumps({"response_hex": response.hex()}, indent=2))
+        return 0
+
+    if arguments.command == "workout":
+        data = await request_workout_data(arguments.address)
+        result = {
+            "entries": [_jsonable(entry) for entry in data.entries],
+            "report": _jsonable(data.report),
+            "gps_track": _jsonable(data.gps_track) if data.gps_track is not None else None,
+            "gps_point_count": len(data.gps_track) if data.gps_track is not None else 0,
+            "point_data_raw_hex": data.point_data_raw.hex() if data.point_data_raw is not None else None,
+        }
+        print(json.dumps(result, indent=2))
         return 0
 
     def print_packet(packet: dict[str, object]) -> None:

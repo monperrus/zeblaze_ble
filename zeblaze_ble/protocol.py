@@ -13,6 +13,7 @@ README.md in this directory.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 
 ZH_SDK_SERVICE = "16186f00-0000-1000-8000-00807f9b34fb"
@@ -34,6 +35,8 @@ CMD_GET_FITNESS_TYPE_ID_LIST = 112
 CMD_REQUEST_FITNESS_TYPE_ID = 113
 CMD_CONFIRM_FITNESS_TYPE_ID = 115
 CMD_GET_FITNESS_SPORT_ID_LIST = 117
+CMD_REQUEST_FITNESS_SPORT_DATA = 119
+CMD_CONFIRM_FITNESS_SPORT_ID_LIST = 121
 CMD_REAL_TIME_DATA_SWITCH = 164
 CMD_REPORT_BASIC_DATA = 165  # watch-initiated push, never sent by us
 CMD_SEND_SYSTEM_NOTIFICATION = 178
@@ -42,6 +45,11 @@ CMD_SEND_SYSTEM_NOTIFICATION = 178
 NOTIFICATION_TYPE_CALL = 0
 NOTIFICATION_TYPE_MISS_CALL = 1
 NOTIFICATION_TYPE_MESSAGE = 2
+
+# Low 2 bits of a sport-entry id's last byte (see SportEntryId below).
+SPORT_DATA_POINT = 0  # per-interval samples, structure not decoded (see protocol.md)
+SPORT_DATA_REPORT = 1  # workout summary -> WorkoutReport
+SPORT_DATA_GPS = 2  # GPS track -> list[GpsPoint]
 
 # fitness_function_type values observed live (there is no known "GPS"/location
 # type among these -- GPS data lives under the separate, unexplored
@@ -116,6 +124,20 @@ def encode_fitness_type_id_request(command_id: int, function_type: int, time_byt
     fitness_type_id = encode_field_bytes(1, time_bytes) + encode_field_varint(2, function_type)
     wrapper = encode_field_bytes(1, fitness_type_id)
     return encode_field_varint(1, command_id) + encode_field_bytes(9, wrapper)
+
+
+def encode_fitness_sport_id_list_request(command_id: int, sport_ids: bytes) -> bytes:
+    """Build a GET/REQUEST/CONFIRM_FITNESS_SPORT_ID_LIST (117/119/121) request.
+
+    Shape `{1: command_id, 9: {3: sport_ids}}` -- note this is a different,
+    shallower shape than `encode_fitness_type_id_request`'s (that one wraps
+    a single date+type selector two levels deep; this one just carries the
+    watch's own opaque sport-entry-id bytes back to it verbatim, however
+    many entries there are). Verified byte-for-byte against a real workout
+    sync capture for commands 119 and 121 (id 117 takes no payload -- use
+    `encode_request(CMD_GET_FITNESS_SPORT_ID_LIST)`).
+    """
+    return encode_field_varint(1, command_id) + encode_field_bytes(9, encode_field_bytes(3, sport_ids))
 
 
 def encode_real_time_data_switch_request(enabled: bool) -> bytes:
@@ -507,3 +529,160 @@ def parse_real_time_data(payload: bytes) -> RealTimeData:
         distance_hourly_raw=_bytes_field(bean, 17),
         calorie_hourly_raw=_bytes_field(bean, 18),
     )
+
+
+@dataclass(frozen=True)
+class SportEntryId:
+    """One 7-byte opaque(-ish) entry from a GET_FITNESS_SPORT_ID_LIST (117) response.
+
+    Byte layout, decoded from a real workout sync capture (2026-08-29) via
+    the app's own `sportparsing` debug log lines, which print exactly this
+    breakdown for each id:
+    `[0:4] timestamp (LE uint32, matches the workout's start time) [4] a
+    constant byte (0x08 in the one capture available, meaning unconfirmed)
+    [5] sport_type (varint-like single byte, 2 = observed for a walk/run)
+    [6] flags byte, whose low 2 bits are the data type (0/1/2, see
+    SPORT_DATA_* constants) and whose upper 6 bits are constant across all
+    3 entries in the one capture (meaning unconfirmed)`.
+    """
+
+    raw: bytes  # exactly 7 bytes
+    timestamp: int
+    sport_type: int
+    data_type: int
+
+
+def parse_sport_id_list(payload: bytes) -> list[SportEntryId]:
+    """Parse a GET_FITNESS_SPORT_ID_LIST (117) response into its 7-byte entries."""
+    fields = decode_protobuf(payload)
+    wrapper = decode_protobuf(_bytes_field(fields, 9))
+    blob = _bytes_field(wrapper, 3)
+    if len(blob) % 7 != 0:
+        raise ValueError(f"sport id list length {len(blob)} is not a multiple of 7")
+    entries = []
+    for i in range(0, len(blob), 7):
+        entry = blob[i : i + 7]
+        entries.append(
+            SportEntryId(
+                raw=entry,
+                timestamp=int.from_bytes(entry[0:4], "little"),
+                sport_type=entry[5],
+                data_type=entry[6] & 0x03,
+            )
+        )
+    return entries
+
+
+@dataclass(frozen=True)
+class WorkoutReport:
+    """Parsed SPORT_DATA_REPORT (dataType 1) summary blob.
+
+    Byte layout found by searching a real 103-byte REPORT blob for this
+    workout's already-known values (from the phone's own sqlite database,
+    `sportmodleinfo`/`exerciseoutdoor` tables -- see android-observations.md)
+    and confirming every offset below against them exactly:
+    `[0:7] sport entry id [7] status byte (0 observed) [8:12] unknown
+    [12:16] start_time (LE uint32, duplicates the entry id's timestamp)
+    [16:20] end_time (LE uint32) [20:24] duration_seconds (LE uint32)
+    [24:28] distance_meters (LE uint32) [28:30] calories (LE uint16)
+    [30:...] unknown [42:44] steps (LE uint16) [44:48] unknown
+    [48] avg_heart_rate (single byte) [49] max_heart_rate (single byte)
+    [50] min_heart_rate (single byte) [51:] unknown/reserved, all zero in
+    the one capture available except a non-zero tail (offset 84+) of
+    unidentified meaning (possibly a checksum).`
+    """
+
+    start_time: int
+    end_time: int
+    duration_seconds: int
+    distance_meters: int
+    calories: int
+    steps: int
+    avg_heart_rate: int
+    max_heart_rate: int
+    min_heart_rate: int
+    raw: bytes
+
+
+def parse_workout_report(blob: bytes) -> WorkoutReport:
+    if len(blob) < 51:
+        raise ValueError(f"REPORT blob too short: {len(blob)} bytes")
+    return WorkoutReport(
+        start_time=int.from_bytes(blob[12:16], "little"),
+        end_time=int.from_bytes(blob[16:20], "little"),
+        duration_seconds=int.from_bytes(blob[20:24], "little"),
+        distance_meters=int.from_bytes(blob[24:28], "little"),
+        calories=int.from_bytes(blob[28:30], "little"),
+        steps=int.from_bytes(blob[42:44], "little"),
+        avg_heart_rate=blob[48],
+        max_heart_rate=blob[49],
+        min_heart_rate=blob[50],
+        raw=blob,
+    )
+
+
+@dataclass(frozen=True)
+class GpsPoint:
+    timestamp: int
+    longitude: float
+    latitude: float
+
+
+def parse_gps_track(blob: bytes) -> list[GpsPoint]:
+    """Parse a SPORT_DATA_GPS (dataType 2) blob.
+
+    `[0:7] sport entry id [7] status byte (0) [8] unknown (0xE0 observed)
+    [9:] repeating 12-byte records: [+0:4] timestamp (LE uint32, absolute
+    Unix seconds) [+4:8] longitude (LE float32) [+8:12] latitude (LE
+    float32)`. Verified point-for-point against the app's own fully-parsed
+    `DevSportInfoBean.map_data`/`recordGpsTime` log output for a real
+    561-point workout track (2026-08-29) -- every timestamp and coordinate
+    matched exactly. A 4-byte remainder after the last full record (bytes
+    9 + 12*n .. end) is unaccounted for; likely a footer/checksum, not
+    another partial point (too short to be one).
+    """
+    points = []
+    offset = 9
+    while offset + 12 <= len(blob):
+        timestamp = int.from_bytes(blob[offset : offset + 4], "little")
+        longitude = struct.unpack_from("<f", blob, offset + 4)[0]
+        latitude = struct.unpack_from("<f", blob, offset + 8)[0]
+        points.append(GpsPoint(timestamp=timestamp, longitude=longitude, latitude=latitude))
+        offset += 12
+    return points
+
+
+@dataclass(frozen=True)
+class WorkoutData:
+    entries: list[SportEntryId]
+    report: WorkoutReport | None
+    gps_track: list[GpsPoint] | None
+    point_data_raw: bytes | None  # SPORT_DATA_POINT -- not decoded, see protocol.md
+
+
+def split_sport_data_blobs(combined: bytes, entries: list[SportEntryId]) -> dict[int, bytes]:
+    """Split one concatenated activity-channel byte stream into per-entry blobs.
+
+    The activity channel (`16186f03`) transfers each requested entry's data
+    as one or more chunked-transport "rounds" back to back, with no
+    wire-level marker for where one entry ends and the next begins -- but
+    each entry's data does start with that entry's own 7-byte id (see
+    `SportEntryId`), which we already know from the GET_FITNESS_SPORT_ID_LIST
+    response. So: find where each known id occurs in the combined stream,
+    and slice between consecutive offsets. Robust as long as a sport-entry
+    id's bytes don't recur elsewhere in the data, which is expected (they
+    encode a timestamp + flags, not a value likely to collide with GPS/
+    sensor payload bytes).
+    """
+    offsets = []
+    for entry in entries:
+        index = combined.find(entry.raw)
+        if index < 0:
+            raise ValueError(f"sport entry id {entry.raw.hex()} not found in combined activity data")
+        offsets.append((index, entry.data_type))
+    offsets.sort()
+    result = {}
+    for i, (start, data_type) in enumerate(offsets):
+        end = offsets[i + 1][0] if i + 1 < len(offsets) else len(combined)
+        result[data_type] = combined[start:end]
+    return result

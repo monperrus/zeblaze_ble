@@ -20,6 +20,8 @@ _READ_VALUE_HANDLE = 0x0021  # 16186f01 characteristic value
 _READ_CCCD_HANDLE = 0x0022
 _WRITE_VALUE_HANDLE = 0x0024  # 16186f02 characteristic value
 _WRITE_CCCD_HANDLE = 0x0025
+_ACTIVITY_VALUE_HANDLE = 0x0027  # 16186f03 characteristic value -- bulk data (e.g. GPS tracks), see protocol.md
+_ACTIVITY_CCCD_HANDLE = 0x0028
 
 _NOTIFICATION_RE = re.compile(r"Notification handle = 0x([0-9a-fA-F]+) value: ([0-9a-fA-F ]+)")
 _PROMPT_TIMEOUT_SECONDS = 15.0
@@ -79,6 +81,7 @@ class GatttoolSession:
             await self._wait_for_connection()
             await self._enable_notifications(_READ_CCCD_HANDLE)
             await self._enable_notifications(_WRITE_CCCD_HANDLE)
+            await self._enable_notifications(_ACTIVITY_CCCD_HANDLE)
         except TimeoutError as error:
             # Bare TimeoutError renders as an empty CLI error, which hides
             # the actionable problem from callers.
@@ -161,9 +164,9 @@ class GatttoolSession:
     async def _write(self, value_handle: int, payload: bytes) -> None:
         await self._send_line(f"char-write-cmd 0x{value_handle:04x} {payload.hex()}")
 
-    async def _next_notification(self, expect_handle: int) -> bytes:
+    async def _next_notification(self, expect_handle: int, timeout: float = _PROMPT_TIMEOUT_SECONDS) -> bytes:
         while True:
-            handle, value = await asyncio.wait_for(self._notifications.get(), timeout=_PROMPT_TIMEOUT_SECONDS)
+            handle, value = await asyncio.wait_for(self._notifications.get(), timeout=timeout)
             if handle == expect_handle:
                 return value
 
@@ -179,19 +182,41 @@ class GatttoolSession:
         if not protocol.is_complete_ack(ack):
             raise RuntimeError(f"expected complete-ack, got {ack.hex()}")
 
-    async def receive_message(self) -> bytes:
-        header = await self._next_notification(_READ_VALUE_HANDLE)
+    async def receive_message(self, value_handle: int = _READ_VALUE_HANDLE, header_timeout: float = _PROMPT_TIMEOUT_SECONDS) -> bytes:
+        header = await self._next_notification(value_handle, timeout=header_timeout)
         if not protocol.is_header_frame(header):
             raise RuntimeError(f"expected header frame, got {header.hex()}")
         count = protocol.chunk_count_from_header(header)
-        await self._write(_READ_VALUE_HANDLE, protocol.ACK_READY)
+        await self._write(value_handle, protocol.ACK_READY)
         chunks: dict[int, bytes] = {}
         for _ in range(count):
-            frame = await self._next_notification(_READ_VALUE_HANDLE)
+            frame = await self._next_notification(value_handle)
             index, chunk = protocol.split_data_chunk(frame)
             chunks[index] = chunk
-        await self._write(_READ_VALUE_HANDLE, protocol.ACK_COMPLETE)
+        await self._write(value_handle, protocol.ACK_COMPLETE)
         return b"".join(chunks[index] for index in sorted(chunks))
+
+    async def receive_all_activity_data(self, grace_seconds: float = 3.0) -> bytes:
+        """Receive every activity-channel (6f03) "round" until none *starts*
+        within `grace_seconds`, concatenating them into one buffer.
+
+        A bulk transfer (e.g. a workout's GPS/point/report data) spans
+        multiple chunked-transport rounds on this channel with no wire-level
+        marker for where it ends -- see `protocol.split_sport_data_blobs`
+        for how the caller is expected to split the result back into
+        per-entry blobs afterwards. Only the wait for each *new* round's
+        header frame is bounded by `grace_seconds`; a round already underway
+        still gets the normal per-notification timeout to finish, however
+        long it takes.
+        """
+        buffer = bytearray()
+        while True:
+            try:
+                round_bytes = await self.receive_message(_ACTIVITY_VALUE_HANDLE, header_timeout=grace_seconds)
+            except (TimeoutError, asyncio.TimeoutError):
+                break
+            buffer.extend(round_bytes)
+        return bytes(buffer)
 
 
 async def request_device_info(address: str) -> protocol.DeviceInfo:
@@ -360,3 +385,43 @@ async def send_notification(
             protocol.encode_system_notification_request(notification_type, phone_number, contacts_info, message_text)
         )
         return await session.receive_message()
+
+
+async def request_workout_data(address: str) -> protocol.WorkoutData:
+    """Connect and fetch the watch's currently-queued workout data (steps/GPS/etc).
+
+    Follows the real sequence observed in a live workout-sync capture
+    (2026-08-29, GPS-tracked walk, see protocol.md's "Workout data" section):
+    GET_FITNESS_SPORT_ID_LIST (117) -> REQUEST_FITNESS_SPORT_DATA (119, no
+    reply on the normal command channel -- its "reply" is bulk data arriving
+    on the activity channel instead) -> drain the activity channel (6f03)
+    until it goes quiet -> CONFIRM_FITNESS_SPORT_ID_LIST (121, acked
+    normally). Returns `WorkoutData(entries=[], ...)` with everything else
+    `None` if there's currently nothing queued (nothing to sync).
+    """
+    async with GatttoolSession(address) as session:
+        await session.send_message(protocol.encode_request(protocol.CMD_GET_FITNESS_SPORT_ID_LIST))
+        list_payload = await session.receive_message()
+        entries = protocol.parse_sport_id_list(list_payload)
+        if not entries:
+            return protocol.WorkoutData(entries=[], report=None, gps_track=None, point_data_raw=None)
+
+        ids_blob = b"".join(entry.raw for entry in entries)
+        await session.send_message(
+            protocol.encode_fitness_sport_id_list_request(protocol.CMD_REQUEST_FITNESS_SPORT_DATA, ids_blob)
+        )
+        combined = await session.receive_all_activity_data()
+        await session.send_message(
+            protocol.encode_fitness_sport_id_list_request(protocol.CMD_CONFIRM_FITNESS_SPORT_ID_LIST, ids_blob)
+        )
+        await session.receive_message()  # generic ack -- not checked
+
+    blobs = protocol.split_sport_data_blobs(combined, entries)
+    report = protocol.parse_workout_report(blobs[protocol.SPORT_DATA_REPORT]) if protocol.SPORT_DATA_REPORT in blobs else None
+    gps_track = protocol.parse_gps_track(blobs[protocol.SPORT_DATA_GPS]) if protocol.SPORT_DATA_GPS in blobs else None
+    return protocol.WorkoutData(
+        entries=entries,
+        report=report,
+        gps_track=gps_track,
+        point_data_raw=blobs.get(protocol.SPORT_DATA_POINT),
+    )
