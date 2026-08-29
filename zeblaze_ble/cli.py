@@ -15,6 +15,7 @@ from . import protocol
 from .client import inspect, listen, scan, serialize_advertisement
 from .gatttool_transport import (
     enable_real_time_data_and_listen,
+    request_current_heart_rate,
     request_device_info,
     request_fitness_data,
     send_notification,
@@ -71,6 +72,24 @@ def parser() -> argparse.ArgumentParser:
     realtime_command.add_argument("address")
     realtime_command.add_argument("--seconds", type=float, default=20)
     realtime_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    heart_rate_command = commands.add_parser(
+        "heartrate",
+        help="return one current heart-rate reading (performs a protocol write)",
+    )
+    heart_rate_command.add_argument("address")
+    heart_rate_command.add_argument(
+        "--seconds",
+        type=float,
+        default=30,
+        help="seconds to wait for each live report attempt (default: 30)",
+    )
+    heart_rate_command.add_argument(
+        "--attempts",
+        type=int,
+        default=3,
+        help="number of transient BLE failures to retry (default: 3)",
+    )
+    heart_rate_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     notify_command = commands.add_parser(
         "notify",
         help="push a notification to the watch (performs a protocol write)",
@@ -137,6 +156,11 @@ async def run(arguments: argparse.Namespace) -> int:
         print(json.dumps([_jsonable(reading) for reading in readings], indent=2))
         return 0
 
+    if arguments.command == "heartrate":
+        heart_rate = await request_current_heart_rate(arguments.address, arguments.seconds, arguments.attempts)
+        print(json.dumps({"heart_rate_bpm": heart_rate}))
+        return 0
+
     if arguments.command == "notify":
         notification_type = {
             "call": protocol.NOTIFICATION_TYPE_CALL,
@@ -161,7 +185,7 @@ def main() -> None:
     arguments = parser().parse_args()
     try:
         raise SystemExit(asyncio.run(run(arguments)))
-    except BleakError as error:
+    except (BleakError, ConnectionError, RuntimeError, TimeoutError) as error:
         raise SystemExit(f"Bluetooth operation failed: {error}")
 
 

@@ -23,6 +23,36 @@ _WRITE_CCCD_HANDLE = 0x0025
 
 _NOTIFICATION_RE = re.compile(r"Notification handle = 0x([0-9a-fA-F]+) value: ([0-9a-fA-F ]+)")
 _PROMPT_TIMEOUT_SECONDS = 15.0
+_CONNECTION_TIMEOUT_SECONDS = 40.0
+
+
+class HeartRateUnavailableError(RuntimeError):
+    """Raised when the watch did not provide a usable live heart-rate value."""
+
+
+async def _disconnect_local_bluez(address: str) -> None:
+    """Release this host's stale BlueZ ACL connection, if one exists.
+
+    `gatttool` occasionally exits before bluetoothd has dropped the link. A
+    subsequent session is then refused as busy even though no gatttool process
+    remains. This only affects the local BlueZ adapter; it cannot disconnect a
+    phone or another BLE central.
+    """
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "bluetoothctl",
+            "disconnect",
+            address,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        process.kill()
+        await process.wait()
 
 
 class GatttoolSession:
@@ -36,6 +66,7 @@ class GatttoolSession:
         self._reader_task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> "GatttoolSession":
+        await _disconnect_local_bluez(self._address)
         self._process = await asyncio.create_subprocess_exec(
             "stdbuf", "-oL", "-eL", "gatttool", "-I", "-b", self._address,
             stdin=asyncio.subprocess.PIPE,
@@ -45,7 +76,7 @@ class GatttoolSession:
         self._reader_task = asyncio.create_task(self._read_loop())
         try:
             await self._send_line("connect")
-            await self._wait_for("Connection successful", timeout_seconds=40)
+            await self._wait_for_connection()
             await self._enable_notifications(_READ_CCCD_HANDLE)
             await self._enable_notifications(_WRITE_CCCD_HANDLE)
         except BaseException:
@@ -59,12 +90,21 @@ class GatttoolSession:
     async def __aexit__(self, *_exc_info: object) -> None:
         if self._process is not None and self._process.returncode is None:
             try:
+                # `exit` alone can leave BlueZ holding the ACL connection for
+                # a while. Explicitly release it so the next command can
+                # connect without a manual `bluetoothctl disconnect`.
+                await self._send_line("disconnect")
+                await self._wait_for_any(("Disconnected", "Connection terminated"), timeout_seconds=2)
+            except (TimeoutError, asyncio.TimeoutError):
+                pass
+            try:
                 await self._send_line("exit")
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except Exception:
                 self._process.kill()
         if self._reader_task is not None:
             self._reader_task.cancel()
+        await _disconnect_local_bluez(self._address)
 
     async def _read_loop(self) -> None:
         """Single reader for the subprocess's stdout: fan lines out to both consumers."""
@@ -87,6 +127,22 @@ class GatttoolSession:
                 line = await self._lines.get()
                 if needle in line:
                     return
+
+    async def _wait_for_any(self, needles: tuple[str, ...], timeout_seconds: float) -> str:
+        async with asyncio.timeout(timeout_seconds):
+            while True:
+                line = await self._lines.get()
+                if any(needle in line for needle in needles):
+                    return line
+
+    async def _wait_for_connection(self) -> None:
+        async with asyncio.timeout(_CONNECTION_TIMEOUT_SECONDS):
+            while True:
+                line = await self._lines.get()
+                if "Connection successful" in line:
+                    return
+                if "Error: connect" in line or "Connection refused" in line:
+                    raise ConnectionError(line)
 
     async def _send_line(self, command: str) -> None:
         assert self._process is not None and self._process.stdin is not None
@@ -220,6 +276,37 @@ async def enable_real_time_data_and_listen(address: str, seconds: float) -> list
                 continue
             readings.append(protocol.parse_real_time_data(payload))
     return readings
+
+
+async def request_current_heart_rate(address: str, seconds: float = 30, attempts: int = 3) -> int:
+    """Return one current non-zero BPM value, retrying transient BLE failures.
+
+    The live stream has a generic command acknowledgment before its data
+    reports and the watch occasionally rejects a connection while waking up.
+    Both cases are handled here so callers can use one command instead of
+    manually disconnecting, waiting, and retrying.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    if seconds <= 0:
+        raise ValueError("seconds must be positive")
+
+    last_error: Exception | None = None
+    for _ in range(attempts):
+        try:
+            readings = await enable_real_time_data_and_listen(address, seconds)
+        except (ConnectionError, RuntimeError, TimeoutError, asyncio.TimeoutError) as error:
+            last_error = error
+            continue
+        for reading in reversed(readings):
+            if reading.heart_rate > 0:
+                return reading.heart_rate
+        last_error = HeartRateUnavailableError("the watch sent no non-zero heart-rate measurement")
+
+    raise HeartRateUnavailableError(
+        f"No current heart-rate reading after {attempts} attempt(s). "
+        "Keep the watch awake and firmly on your wrist, then retry."
+    ) from last_error
 
 
 async def send_notification(

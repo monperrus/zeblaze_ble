@@ -1,7 +1,7 @@
 # Zeblaze BLE
 
-Discovery, packet capture, and (for one command) a live read for the Zeblaze
-Beyond 3 Pro. Its GATT services sit in a vendor UUID namespace that looks
+Discovery, packet capture, and live reads for the Zeblaze Beyond 3 Pro. Its
+GATT services sit in a vendor UUID namespace that looks
 vendor-family-ish at a glance, but a live capture of the real
 `com.zhapp.zeblazefit` app (2026-08-29) showed the production protocol is a
 small, unencrypted, proprietary scheme ("ZH_SDK"): zero SMP pairing packets,
@@ -12,9 +12,10 @@ for the full protocol writeup, and `../NOTES.md` /
 the originally-planned encryption-key extraction (rooting a phone, pulling
 `com.zhapp.zeblazefit`'s app storage) turned out to be unnecessary.
 
-Every command except `battery`, `fitness`, and `realtime` is read-only: scan
-for the watch, verify its GATT layout, subscribe to its notification
-channels, and save received packets as JSON Lines for protocol work.
+`battery`, `fitness`, `realtime`, `heartrate`, and `notify` perform protocol
+writes. The remaining commands scan for the watch, verify its GATT layout,
+subscribe to its notification channels, and save received packets as JSON
+Lines for protocol work.
 
 ## Live GATT exploration finding (2026-08-29)
 
@@ -45,6 +46,24 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
+## Current heart rate
+
+```bash
+zeblaze-ble heartrate <ADDRESS> --i-understand-this-writes
+```
+
+This is the quickest path for a known watch: it connects directly to the
+address, enables the verified live-data stream, and prints one value such as
+`{"heart_rate_bpm": 62}`. It does not scan first, ignores the stream-enable
+acknowledgment, retries transient connection failures up to three times, and
+releases this computer's stale BlueZ connection before and after the request.
+Use `--seconds` or `--attempts` to adjust the 30-second per-attempt wait and
+retry count.
+
+Keep the watch awake and firmly on your wrist. If it is already known to this
+computer, use its known address directly; a connected or sleeping watch may
+not appear in a scan.
+
 ## Scan and inspect
 
 ```bash
@@ -72,18 +91,18 @@ zeblaze-ble listen <ADDRESS> --seconds 90 --output capture.jsonl
 A passive capture may remain empty until a verified, read-only history request
 is implemented; no command bytes are guessed here.
 
-## Battery read (the one command that writes)
+## Device info and battery (writes)
 
 ```bash
 zeblaze-ble battery <ADDRESS> --i-understand-this-writes
 ```
 
 Sends `GET_DEVICE_INFO` (command id 32) and prints firmware version, MAC,
-serial number, and battery status. It is the tool's only protocol write,
-gated behind the explicit `--i-understand-this-writes` flag, justified
-because the command and its framing come from a verified live capture of the
-official app's own traffic rather than a guess. Full protocol details (wire
-framing, command ids, message layout): `zeblaze_ble/protocol.md`.
+serial number, and battery status. It is gated behind the explicit
+`--i-understand-this-writes` flag, justified because the command and its
+framing come from a verified live capture of the official app's own traffic
+rather than a guess. Full protocol details (wire framing, command ids,
+message layout): `zeblaze_ble/protocol.md`.
 
 Live example (2026-08-29):
 
@@ -109,7 +128,7 @@ implementation of the same protocol also exists in `transport.py` (matches
 the official app's wire bytes byte-for-byte against two independent live
 captures) but isn't wired into the CLI because of that resolution issue.
 
-## Fitness data and real-time push (also write)
+## Fitness data and real-time push (writes)
 
 ```bash
 zeblaze-ble fitness <ADDRESS> --i-understand-this-writes
