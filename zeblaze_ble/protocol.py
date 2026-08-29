@@ -660,6 +660,24 @@ class WorkoutData:
     point_data_raw: bytes | None  # SPORT_DATA_POINT -- not decoded, see protocol.md
 
 
+def latest_workout_entries(entries: list[SportEntryId]) -> list[SportEntryId]:
+    """Return just the entries for the most recent workout (max timestamp).
+
+    The queue can hold entries for more than one past workout at once, each
+    identified by its shared `timestamp`. Bundling every queued entry into
+    one `REQUEST_FITNESS_SPORT_DATA` call means one unfetchable/already-
+    consumed workout (e.g. a stale entry the watch stopped offering data
+    for after a premature confirm, see `JOURNAL.md`'s 2026-08-29 entry)
+    blocks every other workout too, since `split_sport_data_blobs` requires
+    every requested entry to be found. Fetching one workout's entries at a
+    time avoids that.
+    """
+    if not entries:
+        return []
+    latest_timestamp = max(entry.timestamp for entry in entries)
+    return [entry for entry in entries if entry.timestamp == latest_timestamp]
+
+
 def split_sport_data_blobs(combined: bytes, entries: list[SportEntryId]) -> dict[int, bytes]:
     """Split one concatenated activity-channel byte stream into per-entry blobs.
 

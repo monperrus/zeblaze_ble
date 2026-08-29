@@ -86,7 +86,7 @@ Concatenate the chunk payloads in index order (`b"".join(chunks[i] for i in
 sorted(chunks))`) to get the actual message bytes, which are themselves a
 small protobuf message (see below).
 
-### Example: a full request/response round trip (verbatim from the app log)
+### Example: a full request/response round trip
 
 Requesting `GET_DEVICE_INFO` (command id 32, `08 20` as protobuf bytes) and
 receiving the reply, both on their respective channels:
@@ -151,11 +151,7 @@ reset, firmware update).
 
 Messages are small ad-hoc protobuf (varint + length-delimited fields only,
 confirmed sufficient for everything seen so far — see
-`protocol.decode_protobuf`, a minimal hand-rolled decoder). No `.proto`
-schema for this SDK has been found or is assumed to exist publicly; field
-layouts below were derived by hand from live payloads plus the app's own
-parsed log output (which prints field names, e.g. `device_battery_status
-{ capacity: 67 charge_status: NOT_CHARGING }`), not by decompiling code.
+`protocol.decode_protobuf`, a minimal hand-rolled decoder).
 
 ### `GET_DEVICE_INFO` response (command id 32)
 
@@ -198,7 +194,7 @@ Decoding the example payload above (`08 20 22 34 0a 32 0a 05 31 2e 31 2e 32
     - `30 00` → field 6, varint 0
     - `38 01` → field 7, varint 1
 
-This matches the app's own log line for the same exchange exactly:
+Example exchange:
 `GET_DEVICE_INFO_VALUE device = firmware_version: "1.1.2" ... capacity: 67
 charge_status: NOT_CHARGING ...`.
 
@@ -385,8 +381,7 @@ for one logical transfer (see below).
 Request: `08 75` (just the command id, like `GET_FITNESS_TYPE_ID_LIST`).
 Response shape `{1: 117, 9: {3: <sport ids>}}`, where `sport ids` is a
 concatenation of 7-byte entries, one per available data blob for the
-queued workout(s) — the app's own `sportparsing` log printed exactly what
-each byte means, matching a live example (`73 B2 92 6A 08 02 8A`):
+queued workout(s):
 
 ```
 [0:4] timestamp (LE uint32, this workout's start time)
@@ -399,6 +394,20 @@ each byte means, matching a live example (`73 B2 92 6A 08 02 8A`):
 
 The one capture had exactly 3 entries for the one workout: GPS, POINT, and
 REPORT (in that order). `protocol.parse_sport_id_list`.
+
+The queue can hold entries for **more than one** past workout at once, each
+group of (typically 3) entries sharing the same `timestamp` field
+(confirmed live 2026-08-29: recording a second workout added a second
+group of 3 entries with a different timestamp alongside the first, still
+listed). A `REQUEST_FITNESS_SPORT_DATA`/`CONFIRM_FITNESS_SPORT_ID_LIST`
+call's `sport_ids` blob should therefore select **one workout's entries at
+a time** (`protocol.latest_workout_entries` picks the most recent group) —
+bundling entries from more than one workout into a single request means
+that request only splits successfully if every one of those entries' data
+can be located, so one unfetchable workout (e.g. one the watch has stopped
+offering real data for, see "`CONFIRM_FITNESS_SPORT_ID_LIST` must only
+follow a verified-complete transfer" below) blocks every other workout
+bundled with it too.
 
 ### `REQUEST_FITNESS_SPORT_DATA` (119) — fetch it, and `CONFIRM_FITNESS_SPORT_ID_LIST` (121) — acknowledge it
 
@@ -416,25 +425,71 @@ on the activity channel (`6f03`) instead — the bulk transfer itself *is*
 the reply. Only after that transfer finishes does the app send 121, which
 *does* get a normal `{1: 121, 100: 0}` ack on `6f01`.
 
-### The activity-channel transfer: multiple rounds, no wire-level boundary marker
+### The activity-channel transfer: multiple rounds, no wire-level boundary marker, either GATT channel
 
-The single capture showed the watch sending the 3 requested entries'
-combined ~7.8KB of data as **7 separate header/ready-ack/chunks/complete-ack
-rounds** back to back on `6f03` (chunk counts `7, 7, 7, 7, 5, 1, 1` — 35
-individual data-chunk notifications, ~225 bytes each, consistent with the
-negotiated 247-byte ATT MTU). 
+The single offline capture showed the watch sending the 3 requested
+entries' combined ~7.8KB of data as **7 separate header/ready-ack/chunks/
+complete-ack rounds** back to back on `6f03` (chunk counts `7, 7, 7, 7, 5,
+1, 1` — 35 individual data-chunk notifications, ~225 bytes each, consistent
+with the negotiated 247-byte ATT MTU).
 
-`zeblaze_ble` uses a  robust strategy:
-`GatttoolSession.receive_all_activity_data` just keeps receiving rounds
-and concatenating them into one buffer until no new round *starts* within
-a grace period (default 3s) — a round already in progress still gets the
-normal per-notification timeout, only the wait for the *next* round's
-header is bounded by the grace period. Then, since every entry's data
-starts with that entry's own 7-byte id (already known from the 117
-response), `protocol.split_sport_data_blobs` finds each id's byte offset
-in the combined buffer and slices between them. This worked correctly
-against the one real capture available (reproduced offline from the log,
-not yet re-verified with a fresh live fetch — see "Live-tested" below).
+A round's header is not guaranteed to arrive on `6f03`: it can also arrive
+on `6f01` (the normal command-response channel), observed live for the
+first round of a real transfer. A receiver must accept a round's header on
+*either* handle and complete that round (ready-ack, chunks, complete-ack)
+on whichever handle it arrived on — see
+`GatttoolSession.receive_all_activity_data`.
+
+`zeblaze_ble` uses a robust strategy: `receive_all_activity_data` keeps
+receiving rounds and concatenating them into one buffer until no new round
+*starts* within a grace period (default 3s after the first round, longer —
+matching the normal per-message timeout — for the first round itself,
+since a live transfer's first round can take noticeably longer than 3s to
+begin). A round already in progress still gets the normal per-notification
+timeout, only the wait for the *next* round's header is bounded by the
+grace period. Then, since every entry's data starts with that entry's own
+7-byte id (already known from the 117 response),
+`protocol.split_sport_data_blobs` finds each id's byte offset in the
+combined buffer and slices between them.
+
+### `CONFIRM_FITNESS_SPORT_ID_LIST` must only follow a verified-complete transfer
+
+Send 121 only after `split_sport_data_blobs` has confirmed every requested
+entry is present in the received bytes. Confirming a partial or empty
+transfer tells the watch the data was delivered: a repeated
+`REQUEST_FITNESS_SPORT_DATA` for the same entries after a premature confirm
+no longer returns the real payload, only a fixed 29-byte reply, byte-identical
+across retries:
+
+```
+08 1b 1a 19 42 17 08 00 10 01 1a 11 44 36 3a 34 35 3a 31 35 3a 33 30 3a 30 34 3a 37 31
+```
+
+which decodes to `{1: 27, 3: {8: {1: 0, 2: 1, 3: "<watch MAC as ASCII>"}}}`
+— command id 27 is never sent by this tool, and the shape doesn't match the
+generic ack (`{1: <echoed command id>, 100: <code>}`) used everywhere else
+in this protocol. Its exact meaning (a distinct "already delivered, nothing
+to send" reply vs. an unrelated periodic identity broadcast that merely
+coincides with this window) is **not confirmed** — but a premature confirm
+reproducibly and, so far, permanently makes the real payload for those
+entries unobtainable. `request_workout_data` raises instead of confirming
+when the drain comes back incomplete.
+
+**`REQUEST_FITNESS_SPORT_DATA` itself may be one-shot per entry id,
+independent of whether `CONFIRM_FITNESS_SPORT_ID_LIST` is ever sent.**
+Live-tested 2026-08-29: a workout whose entries had only ever been sent in
+a *bundled* `REQUEST_FITNESS_SPORT_DATA` call (mixed with another,
+already-stale, workout's entries — a call that never reached the confirm
+step, since the mixed-in stale entry made `split_sport_data_blobs` fail
+first) later returned only the `{1: 27, ...}` stub on every subsequent
+`REQUEST_FITNESS_SPORT_DATA` retry for *just that workout's own entries in
+isolation*, across 8 separate attempts. If confirming were the only thing
+that marked an entry as delivered, an unconfirmed entry should still have
+been re-offerable. It wasn't. Treat every `REQUEST_FITNESS_SPORT_DATA` call
+for a given entry id as consuming that id's one real-data delivery, not
+just every confirmed one — so don't retry a failed/partial workout fetch by
+re-sending `REQUEST_FITNESS_SPORT_DATA` for the same ids; a fresh workout
+recording is the only known way to get a usable id again.
 
 ### `SPORT_DATA_REPORT` (dataType 1) — workout summary, 103 bytes in the one capture
 
@@ -476,11 +531,7 @@ Live values matched the phone's database exactly: `distance_meters=1552`,
         [+8:12] latitude (LE float32)
 ```
 
-Verified point-for-point against the app's own fully-parsed
-`DevSportInfoBean.map_data` (a `"lon,lat;lon,lat;..."` string) and
-`recordGpsTime` (comma-separated per-point Unix timestamps) log output —
-every one of the 561 points' timestamp, longitude, and latitude matched
-exactly. A 4-byte remainder after the last full 12-byte record is
+A 4-byte remainder after the last full 12-byte record is
 unaccounted for (too short to be another point; likely a footer/checksum).
 `protocol.parse_gps_track`.
 

@@ -32,6 +32,10 @@ class HeartRateUnavailableError(RuntimeError):
     """Raised when the watch did not provide a usable live heart-rate value."""
 
 
+class GattOperationError(RuntimeError):
+    """Raised when gatttool reports an explicit `Error: ...` ATT response."""
+
+
 async def _disconnect_local_bluez(address: str) -> None:
     """Release this host's stale BlueZ ACL connection, if one exists.
 
@@ -77,6 +81,15 @@ class GatttoolSession:
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         try:
+            # gatttool needs a moment after spawning before its interactive
+            # prompt/readline loop is actually ready to process stdin -- a
+            # "connect" sent immediately after exec can be dropped or
+            # mishandled (observed live 2026-08-29: gatttool would print its
+            # prompt and then hang indefinitely, with a
+            # "GLib-CRITICAL: Source ID 1 was not found" warning, never
+            # attempting the connection at all; a 1s delay before the first
+            # command reliably avoided this in manual testing).
+            await asyncio.sleep(1.0)
             await self._send_line("connect")
             await self._wait_for_connection()
             await self._enable_notifications(_READ_CCCD_HANDLE)
@@ -126,8 +139,6 @@ class GatttoolSession:
             if match:
                 handle = int(match.group(1), 16)
                 value = bytes.fromhex(match.group(2).replace(" ", ""))
-                import sys
-                print(f"DEBUG notif handle=0x{handle:04x} value={value.hex()}", file=sys.stderr)
                 self._notifications.put_nowait((handle, value))
             self._lines.put_nowait(line)
 
@@ -137,6 +148,17 @@ class GatttoolSession:
                 line = await self._lines.get()
                 if needle in line:
                     return
+
+    async def _wait_for_success_or_error(self, needle: str, timeout_seconds: float = _PROMPT_TIMEOUT_SECONDS) -> None:
+        """Like `_wait_for`, but raises immediately on a gatttool `Error:` line
+        instead of waiting out the full timeout for one that will never come."""
+        async with asyncio.timeout(timeout_seconds):
+            while True:
+                line = await self._lines.get()
+                if needle in line:
+                    return
+                if "Error:" in line:
+                    raise GattOperationError(line)
 
     async def _wait_for_any(self, needles: tuple[str, ...], timeout_seconds: float) -> str:
         async with asyncio.timeout(timeout_seconds):
@@ -161,7 +183,21 @@ class GatttoolSession:
 
     async def _enable_notifications(self, cccd_handle: int) -> None:
         await self._send_line(f"char-write-req 0x{cccd_handle:04x} 0100")
-        await self._wait_for("Characteristic value was written successfully")
+        try:
+            await self._wait_for_success_or_error("Characteristic value was written successfully")
+        except GattOperationError:
+            # BLE "Robust Caching": after the watch's GATT database changes
+            # (e.g. a factory reset), the *first* ATT request from a
+            # previously-bonded client -- any request, not specifically
+            # this one -- gets rejected with "Database Out of Sync" (ATT
+            # error 0x12, gatttool renders it as a generic "Unexpected
+            # error code"). That rejection is what clears the server's
+            # per-client "change-unaware" flag; every request after it
+            # succeeds normally. Live-tested 2026-08-29 after a watch
+            # factory reset: confirmed the immediate retry of the exact
+            # same write succeeds. Retry once; a second failure is real.
+            await self._send_line(f"char-write-req 0x{cccd_handle:04x} 0100")
+            await self._wait_for("Characteristic value was written successfully")
 
     async def _write(self, value_handle: int, payload: bytes) -> None:
         await self._send_line(f"char-write-cmd 0x{value_handle:04x} {payload.hex()}")
@@ -427,19 +463,38 @@ async def request_workout_data(address: str) -> protocol.WorkoutData:
 
     Follows the real sequence observed in a live workout-sync capture
     (2026-08-29, GPS-tracked walk, see protocol.md's "Workout data" section):
-    GET_FITNESS_SPORT_ID_LIST (117) -> REQUEST_FITNESS_SPORT_DATA (119, no
-    reply on the normal command channel -- its "reply" is bulk data arriving
-    on the activity channel instead) -> drain the activity channel (6f03)
-    until it goes quiet -> CONFIRM_FITNESS_SPORT_ID_LIST (121, acked
-    normally). Returns `WorkoutData(entries=[], ...)` with everything else
-    `None` if there's currently nothing queued (nothing to sync).
+    GET_FITNESS_SPORT_ID_LIST (117) -> REQUEST_FITNESS_SPORT_DATA (119) ->
+    drain the reply's rounds (each round's header can land on either the
+    activity channel 6f03 or the normal command-response channel 6f01 --
+    live-tested 2026-08-29, see `receive_all_activity_data`) until quiet ->
+    CONFIRM_FITNESS_SPORT_ID_LIST (121, acked normally). Returns
+    `WorkoutData(entries=[], ...)` with everything else `None` if there's
+    currently nothing queued (nothing to sync).
+
+    CONFIRM is only sent once `split_sport_data_blobs` has actually located
+    every requested entry in the received bytes: live-tested 2026-08-29, an
+    earlier version of this function sent CONFIRM unconditionally whenever
+    the bulk transfer's own ack was flaky, even when `combined` turned out
+    to be empty or incomplete -- telling the watch the data was delivered
+    when it wasn't, after which the watch stopped offering the real payload
+    for that entry (a `{1: 27, ...}` status reply carrying nothing but its
+    own MAC address came back instead, repeated verbatim on retry). Never
+    confirm receipt of data that wasn't actually verified as received.
+
+    Only the **most recent** queued workout's entries are requested (see
+    `protocol.latest_workout_entries`): the queue can hold more than one
+    past workout at once, and bundling every queued entry into one request
+    means a single unfetchable one (e.g. a previously stale-confirmed
+    workout) blocks every other workout's data too, since a bundled
+    transfer must contain every requested entry to be split successfully.
     """
     async with GatttoolSession(address) as session:
         await session.send_message(protocol.encode_request(protocol.CMD_GET_FITNESS_SPORT_ID_LIST))
         list_payload = await session.receive_message()
-        entries = protocol.parse_sport_id_list(list_payload)
-        if not entries:
+        all_entries = protocol.parse_sport_id_list(list_payload)
+        if not all_entries:
             return protocol.WorkoutData(entries=[], report=None, gps_track=None, point_data_raw=None)
+        entries = protocol.latest_workout_entries(all_entries)
 
         ids_blob = b"".join(entry.raw for entry in entries)
         await session.send_message(
@@ -447,11 +502,20 @@ async def request_workout_data(address: str) -> protocol.WorkoutData:
         )
         combined = await session.receive_all_activity_data()
         try:
-            # Best-effort: by this point the data is already safely in `combined`,
-            # so a flaky ack here (the same transport-wide issue documented in
-            # TODO.md, not specific to this command) shouldn't discard it. We
-            # still try to confirm so the watch can dequeue the entry, but don't
-            # let a failure here lose data we already have.
+            blobs = protocol.split_sport_data_blobs(combined, entries)
+        except ValueError as error:
+            raise RuntimeError(
+                f"incomplete sport data for entries {entries!r} ({len(combined)} bytes received); "
+                f"not confirming, so the watch keeps offering it: {error}"
+            ) from error
+
+        try:
+            # Best-effort: `blobs` is already parsed and safe by this point,
+            # so a flaky ack on the confirm itself (the same transport-wide
+            # issue documented in TODO.md, not specific to this command)
+            # shouldn't discard it. We still try to confirm so the watch can
+            # dequeue the entry, but don't let a failure here lose data we
+            # already have.
             await session.send_message(
                 protocol.encode_fitness_sport_id_list_request(protocol.CMD_CONFIRM_FITNESS_SPORT_ID_LIST, ids_blob)
             )
@@ -459,10 +523,6 @@ async def request_workout_data(address: str) -> protocol.WorkoutData:
         except (TimeoutError, asyncio.TimeoutError, RuntimeError):
             pass
 
-    import sys
-    print(f"DEBUG entries={entries}", file=sys.stderr)
-    print(f"DEBUG combined_len={len(combined)} combined_hex={combined.hex()}", file=sys.stderr)
-    blobs = protocol.split_sport_data_blobs(combined, entries)
     report = protocol.parse_workout_report(blobs[protocol.SPORT_DATA_REPORT]) if protocol.SPORT_DATA_REPORT in blobs else None
     gps_track = protocol.parse_gps_track(blobs[protocol.SPORT_DATA_GPS]) if protocol.SPORT_DATA_GPS in blobs else None
     return protocol.WorkoutData(
