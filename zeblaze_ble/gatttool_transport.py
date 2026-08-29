@@ -126,6 +126,8 @@ class GatttoolSession:
             if match:
                 handle = int(match.group(1), 16)
                 value = bytes.fromhex(match.group(2).replace(" ", ""))
+                import sys
+                print(f"DEBUG notif handle=0x{handle:04x} value={value.hex()}", file=sys.stderr)
                 self._notifications.put_nowait((handle, value))
             self._lines.put_nowait(line)
 
@@ -196,7 +198,9 @@ class GatttoolSession:
         await self._write(value_handle, protocol.ACK_COMPLETE)
         return b"".join(chunks[index] for index in sorted(chunks))
 
-    async def receive_all_activity_data(self, grace_seconds: float = 3.0) -> bytes:
+    async def receive_all_activity_data(
+        self, grace_seconds: float = 3.0, first_round_timeout: float = _PROMPT_TIMEOUT_SECONDS
+    ) -> bytes:
         """Receive every activity-channel (6f03) "round" until none *starts*
         within `grace_seconds`, concatenating them into one buffer.
 
@@ -205,17 +209,25 @@ class GatttoolSession:
         marker for where it ends -- see `protocol.split_sport_data_blobs`
         for how the caller is expected to split the result back into
         per-entry blobs afterwards. Only the wait for each *new* round's
-        header frame is bounded by `grace_seconds`; a round already underway
-        still gets the normal per-notification timeout to finish, however
-        long it takes.
+        header frame is bounded by `grace_seconds` -- except the very first
+        round, which gets `first_round_timeout`: a live (non-replayed)
+        transfer can take noticeably longer than `grace_seconds` for the
+        watch to start sending the first round (observed live 2026-08-29:
+        the watch needed >3s to begin a real 3-entry GPS+report+point
+        transfer), and `grace_seconds` there mistook "hasn't started yet"
+        for "transfer already finished," returning an empty buffer. A round
+        already underway still gets the normal per-notification timeout to
+        finish, however long it takes.
         """
         buffer = bytearray()
+        header_timeout = first_round_timeout
         while True:
             try:
-                round_bytes = await self.receive_message(_ACTIVITY_VALUE_HANDLE, header_timeout=grace_seconds)
+                round_bytes = await self.receive_message(_ACTIVITY_VALUE_HANDLE, header_timeout=header_timeout)
             except (TimeoutError, asyncio.TimeoutError):
                 break
             buffer.extend(round_bytes)
+            header_timeout = grace_seconds
         return bytes(buffer)
 
 
@@ -411,11 +423,22 @@ async def request_workout_data(address: str) -> protocol.WorkoutData:
             protocol.encode_fitness_sport_id_list_request(protocol.CMD_REQUEST_FITNESS_SPORT_DATA, ids_blob)
         )
         combined = await session.receive_all_activity_data()
-        await session.send_message(
-            protocol.encode_fitness_sport_id_list_request(protocol.CMD_CONFIRM_FITNESS_SPORT_ID_LIST, ids_blob)
-        )
-        await session.receive_message()  # generic ack -- not checked
+        try:
+            # Best-effort: by this point the data is already safely in `combined`,
+            # so a flaky ack here (the same transport-wide issue documented in
+            # TODO.md, not specific to this command) shouldn't discard it. We
+            # still try to confirm so the watch can dequeue the entry, but don't
+            # let a failure here lose data we already have.
+            await session.send_message(
+                protocol.encode_fitness_sport_id_list_request(protocol.CMD_CONFIRM_FITNESS_SPORT_ID_LIST, ids_blob)
+            )
+            await session.receive_message()  # generic ack -- not checked
+        except (TimeoutError, asyncio.TimeoutError, RuntimeError):
+            pass
 
+    import sys
+    print(f"DEBUG entries={entries}", file=sys.stderr)
+    print(f"DEBUG combined_len={len(combined)} combined_hex={combined.hex()}", file=sys.stderr)
     blobs = protocol.split_sport_data_blobs(combined, entries)
     report = protocol.parse_workout_report(blobs[protocol.SPORT_DATA_REPORT]) if protocol.SPORT_DATA_REPORT in blobs else None
     gps_track = protocol.parse_gps_track(blobs[protocol.SPORT_DATA_GPS]) if protocol.SPORT_DATA_GPS in blobs else None
