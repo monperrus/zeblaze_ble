@@ -247,6 +247,18 @@ async def request_fitness_data(address: str) -> list[tuple[protocol.FitnessTypeE
     return results
 
 
+def is_real_time_data_report(payload: bytes) -> bool:
+    """Return whether a payload is a REPORT_BASIC_DATA (165) message."""
+    fields = protocol.decode_protobuf(payload)
+    command = fields.get(1, [None])[0]
+    return (
+        command is not None
+        and command.wire_type == 0
+        and command.raw == protocol.CMD_REPORT_BASIC_DATA
+        and 12 in fields
+    )
+
+
 async def enable_real_time_data_and_listen(address: str, seconds: float) -> list[protocol.RealTimeData]:
     """Connect, enable real-time reporting (command 164), and collect REPORT_BASIC_DATA (165) pushes.
 
@@ -265,14 +277,7 @@ async def enable_real_time_data_and_listen(address: str, seconds: float) -> list
                 payload = await asyncio.wait_for(session.receive_message(), timeout=max(deadline - loop.time(), 0.1))
             except (TimeoutError, asyncio.TimeoutError):
                 break
-            fields = protocol.decode_protobuf(payload)
-            command = fields.get(1, [None])[0]
-            if (
-                command is None
-                or command.wire_type != 0
-                or command.raw != protocol.CMD_REPORT_BASIC_DATA
-                or 12 not in fields
-            ):
+            if not is_real_time_data_report(payload):
                 continue
             readings.append(protocol.parse_real_time_data(payload))
     return readings

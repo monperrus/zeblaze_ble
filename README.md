@@ -64,6 +64,18 @@ Keep the watch awake and firmly on your wrist. If it is already known to this
 computer, use its known address directly; a connected or sleeping watch may
 not appear in a scan.
 
+## Continuous heart-rate monitor
+
+```bash
+.venv/bin/python scripts/heartrate_every_minute.py <ADDRESS> --i-understand-this-writes
+```
+
+The monitor establishes one GATT connection, enables the real-time stream
+once, and prints a JSON Lines heart-rate value immediately and then every 60
+seconds. It keeps the same connection and acknowledges the incoming stream
+packets between prints, so it does not reconnect for each reading. Stop it
+with Ctrl-C; use `--interval` to change the output cadence.
+
 ## Scan and inspect
 
 ```bash
