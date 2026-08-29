@@ -172,6 +172,14 @@ class GatttoolSession:
             if handle == expect_handle:
                 return value
 
+    async def _next_notification_any(
+        self, expect_handles: frozenset[int], timeout: float = _PROMPT_TIMEOUT_SECONDS
+    ) -> tuple[int, bytes]:
+        while True:
+            handle, value = await asyncio.wait_for(self._notifications.get(), timeout=timeout)
+            if handle in expect_handles:
+                return handle, value
+
     async def send_message(self, payload: bytes, mtu_chunk_size: int = 180) -> None:
         chunks = [payload[i : i + mtu_chunk_size] for i in range(0, len(payload), mtu_chunk_size)] or [b""]
         await self._write(_WRITE_VALUE_HANDLE, protocol.header_frame(len(chunks)))
@@ -201,32 +209,47 @@ class GatttoolSession:
     async def receive_all_activity_data(
         self, grace_seconds: float = 3.0, first_round_timeout: float = _PROMPT_TIMEOUT_SECONDS
     ) -> bytes:
-        """Receive every activity-channel (6f03) "round" until none *starts*
-        within `grace_seconds`, concatenating them into one buffer.
+        """Receive every bulk-transfer "round" until none *starts* within
+        `grace_seconds`, concatenating them into one buffer.
 
         A bulk transfer (e.g. a workout's GPS/point/report data) spans
-        multiple chunked-transport rounds on this channel with no wire-level
-        marker for where it ends -- see `protocol.split_sport_data_blobs`
-        for how the caller is expected to split the result back into
-        per-entry blobs afterwards. Only the wait for each *new* round's
-        header frame is bounded by `grace_seconds` -- except the very first
-        round, which gets `first_round_timeout`: a live (non-replayed)
-        transfer can take noticeably longer than `grace_seconds` for the
-        watch to start sending the first round (observed live 2026-08-29:
-        the watch needed >3s to begin a real 3-entry GPS+report+point
-        transfer), and `grace_seconds` there mistook "hasn't started yet"
-        for "transfer already finished," returning an empty buffer. A round
-        already underway still gets the normal per-notification timeout to
-        finish, however long it takes.
+        multiple chunked-transport rounds with no wire-level marker for
+        where it ends -- see `protocol.split_sport_data_blobs` for how the
+        caller is expected to split the result back into per-entry blobs
+        afterwards. Only the wait for each *new* round's header frame is
+        bounded by `grace_seconds` -- except the very first round, which
+        gets `first_round_timeout` (a live transfer can take noticeably
+        longer than `grace_seconds` for the watch to start sending it).
+
+        Each round's header is accepted on *either* `_ACTIVITY_VALUE_HANDLE`
+        (6f03) or `_READ_VALUE_HANDLE` (6f01): live-tested 2026-08-29 against
+        a real (non-replayed) workout, the first round of a
+        REQUEST_FITNESS_SPORT_DATA reply arrived on 6f01, the normal
+        command-response channel, not 6f03 as the offline-capture-derived
+        assumption in protocol.md had it. Polling only 6f03 silently
+        discarded that header notification and never sent back the
+        ready-ack the watch was waiting for, stalling the whole transfer.
+        Each round is completed on whichever handle its header arrived on.
         """
+        handles = frozenset({_ACTIVITY_VALUE_HANDLE, _READ_VALUE_HANDLE})
         buffer = bytearray()
         header_timeout = first_round_timeout
         while True:
             try:
-                round_bytes = await self.receive_message(_ACTIVITY_VALUE_HANDLE, header_timeout=header_timeout)
+                value_handle, header = await self._next_notification_any(handles, timeout=header_timeout)
             except (TimeoutError, asyncio.TimeoutError):
                 break
-            buffer.extend(round_bytes)
+            if not protocol.is_header_frame(header):
+                raise RuntimeError(f"expected header frame, got {header.hex()} on handle 0x{value_handle:04x}")
+            count = protocol.chunk_count_from_header(header)
+            await self._write(value_handle, protocol.ACK_READY)
+            chunks: dict[int, bytes] = {}
+            for _ in range(count):
+                frame = await self._next_notification(value_handle)
+                index, chunk = protocol.split_data_chunk(frame)
+                chunks[index] = chunk
+            await self._write(value_handle, protocol.ACK_COMPLETE)
+            buffer.extend(b"".join(chunks[index] for index in sorted(chunks)))
             header_timeout = grace_seconds
         return bytes(buffer)
 
