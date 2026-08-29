@@ -139,3 +139,7 @@ Returns an empty `entries` list if nothing is currently queued — per this
 protocol's established single-consume-queue behavior (see the "Fitness
 data" section), a workout already fetched
 won't be offered again.
+
+## License 
+
+MIT
