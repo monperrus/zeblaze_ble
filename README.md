@@ -74,7 +74,9 @@ The monitor establishes one GATT connection, enables the real-time stream
 once, and prints a JSON Lines heart-rate value immediately and then every 60
 seconds. It keeps the same connection and acknowledges the incoming stream
 packets between prints, so it does not reconnect for each reading. Stop it
-with Ctrl-C; use `--interval` to change the output cadence.
+with Ctrl-C; use `--interval` to change the output cadence. It retries only
+initial connection failures (three attempts by default; change with
+`--attempts`) and keeps the successful session open.
 
 ## Scan and inspect
 
@@ -157,3 +159,35 @@ protocol writeup, including exactly what fields mean and what's still
 unverified (e.g. no GPS/location command has been found yet, and the packed
 step/distance/calorie byte arrays are unverified against real non-zero
 data since this watch is fresh): `zeblaze_ble/protocol.md`.
+
+## Push a notification (writes)
+
+```bash
+zeblaze-ble notify <ADDRESS> --type message --sender "Alice" --text "Hi!" --i-understand-this-writes
+zeblaze-ble notify <ADDRESS> --type call --phone "+1234567890" --sender "Alice" --i-understand-this-writes
+zeblaze-ble notify <ADDRESS> --type miss_call --phone "+1234567890" --sender "Alice" --i-understand-this-writes
+```
+
+Sends `SEND_SYSTEM_NOTIFICATION` (command id 178). Unlike every other write
+in this tool, this command was never observed in a live capture — no
+notification was ever sent during any capture session. It was instead
+recovered by pulling the real `com.zhapp.zeblazefit` APK off the phone
+(`adb`), decompiling it, and running its own compiled notification-encoding
+code directly in a small JVM harness with the real protobuf runtime, so the
+bytes this produces are exactly what the official app would send, not a
+guess. See `zeblaze_ble/protocol.md` for the full method and the verified
+example bytes, and `android-observations.md` for the APK-pull/decompile
+mechanics.
+
+**Known limitation, confirmed live**: the watch acks this command as
+successful every time, but does **not** display the `--sender`/`--text`
+content — it shows a fixed system prompt instead ("please connect the BT in
+the phone's setting"), for all three `--type` values. Likely needs a
+classic-Bluetooth (BR/EDR) pairing alongside the BLE link, which this tool
+has never established — see protocol.md's "Push notification" section for
+the detail and the leading hypothesis. Useful today for verifying the wire
+protocol and getting an ack; not yet useful for actually notifying anyone.
+
+Live example (2026-08-29): `zeblaze-ble notify` sent a `message` type
+notification and got back `{"response_hex": "08b201a00600"}` — the generic
+ack shape (`{1: 178, 100: 0}`, `100: 0` = success).

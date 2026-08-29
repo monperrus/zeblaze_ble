@@ -79,6 +79,11 @@ class GatttoolSession:
             await self._wait_for_connection()
             await self._enable_notifications(_READ_CCCD_HANDLE)
             await self._enable_notifications(_WRITE_CCCD_HANDLE)
+        except TimeoutError as error:
+            # Bare TimeoutError renders as an empty CLI error, which hides
+            # the actionable problem from callers.
+            await self.__aexit__(None, None, None)
+            raise ConnectionError(f"Timed out connecting to or configuring {self._address}") from error
         except BaseException:
             # __aexit__ is never called if __aenter__ raises: clean up the
             # subprocess ourselves or it leaks and holds the LE connection,
@@ -314,17 +319,43 @@ async def request_current_heart_rate(address: str, seconds: float = 30, attempts
     ) from last_error
 
 
+# The user id this watch is bound to, pulled from the phone's own
+# info_fit.xml (USER_ID) during the 2026-08-29 session -- see
+# android-observations.md. Not a secret (it's the account's own numeric
+# id, sent in cleartext by the real app on every connect), but specific to
+# this one watch/account pairing; pass user_id explicitly for a different one.
+_BOUND_USER_ID = "2011999"
+
+
 async def send_notification(
-    address: str, notification_type: int, phone_number: str = "", contacts_info: str = "", message_text: str = ""
+    address: str,
+    notification_type: int,
+    phone_number: str = "",
+    contacts_info: str = "",
+    message_text: str = "",
+    user_id: str = _BOUND_USER_ID,
 ) -> bytes:
     """Connect and push a SEND_SYSTEM_NOTIFICATION (178) to the watch.
 
-    Returns the raw response payload (the generic ack/error-code shape
-    documented in protocol.md, `{1: 178, 100: <code>}`) for the caller to
-    inspect/log -- this command was never seen live, only reconstructed
+    Sends VERIFY_USER_NUMBER (19) first, in the same connection, before the
+    notification -- the real app always does this immediately after
+    connecting and before any data command, but a bare notification-only
+    connection skips it. The watch acks a notification either way, but
+    live-tested 2026-08-29 (see TODO.md), a bare connection's notification
+    is acked yet never actually displayed (the watch shows a fixed "please
+    connect the BT in the phone's setting" prompt instead) -- this
+    identify-first sequence is an attempt to fix that while staying BLE-only
+    (no classic-Bluetooth pairing), not yet confirmed to work.
+
+    Returns the notification's response payload (the generic ack/error-code
+    shape documented in protocol.md, `{1: 178, 100: <code>}`) for the caller
+    to inspect/log -- this command was never seen live, only reconstructed
     from the app's own bytecode, so nothing about its response is assumed.
     """
     async with GatttoolSession(address) as session:
+        await session.send_message(protocol.encode_verify_user_number_request(user_id))
+        await session.receive_message()  # verify_result{verify_result_type, binding_status} -- not checked here
+        await asyncio.sleep(1.0)  # give the watch time to settle before the next write; see TODO.md
         await session.send_message(
             protocol.encode_system_notification_request(notification_type, phone_number, contacts_info, message_text)
         )

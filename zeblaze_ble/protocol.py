@@ -131,6 +131,20 @@ def encode_real_time_data_switch_request(enabled: bool) -> bytes:
     return encode_field_varint(1, CMD_REAL_TIME_DATA_SWITCH) + encode_field_bytes(12, inner)
 
 
+def encode_verify_user_number_request(user_id: str) -> bytes:
+    """Build a VERIFY_USER_NUMBER (19) request: `{1: 19, 3: {6: user_id}}`.
+
+    Verified against the live capture: `08 13 1a 09 32 07 "2011999"` for
+    user id "2011999". The app always sends this right after connecting,
+    before any data command -- `notify`/`battery`/etc. skip it entirely,
+    which may be why the watch doesn't treat those bare connections as a
+    legitimate bound phone (see TODO.md's "notify is acked but not actually
+    displayed" entry).
+    """
+    inner = encode_field_bytes(6, user_id.encode("utf-8"))
+    return encode_field_varint(1, CMD_VERIFY_USER_NUMBER) + encode_field_bytes(3, inner)
+
+
 def encode_system_notification_request(
     notification_type: int, phone_number: str = "", contacts_info: str = "", message_text: str = ""
 ) -> bytes:
