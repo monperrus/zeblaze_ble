@@ -430,28 +430,50 @@ async def send_notification(
     contacts_info: str = "",
     message_text: str = "",
     user_id: str = _BOUND_USER_ID,
+    warmup: str = "full",
 ) -> bytes:
     """Connect and push a SEND_SYSTEM_NOTIFICATION (178) to the watch.
 
-    Sends VERIFY_USER_NUMBER (19) first, in the same connection, before the
-    notification -- the real app always does this immediately after
-    connecting and before any data command, but a bare notification-only
-    connection skips it. The watch acks a notification either way, but
-    live-tested 2026-08-29 (see TODO.md), a bare connection's notification
-    is acked yet never actually displayed (the watch shows a fixed "please
-    connect the BT in the phone's setting" prompt instead) -- this
-    identify-first sequence is an attempt to fix that while staying BLE-only
-    (no classic-Bluetooth pairing), not yet confirmed to work.
+    `warmup` controls which precondition commands are sent before the
+    notification, in the same connection -- an attempt to fix a
+    2026-08-29-observed problem: a bare notification-only connection gets a
+    protocol-level ack but the watch shows a fixed "please connect the BT in
+    the phone's setting" prompt instead of the real content. This is BLE-only
+    (no classic-Bluetooth pairing) by design; see TODO.md's "notify" entry
+    for the live-test history, including the (inconclusive) hypothesis that
+    the watch's firmware may gate notification display on a classic-BT link
+    regardless of what's sent over BLE.
 
-    Returns the notification's response payload (the generic ack/error-code
-    shape documented in protocol.md, `{1: 178, 100: <code>}`) for the caller
-    to inspect/log -- this command was never seen live, only reconstructed
-    from the app's own bytecode, so nothing about its response is assumed.
+    - "none": just the notification, nothing else (the original bare path).
+    - "verify": VERIFY_USER_NUMBER (19) first -- the real app always sends
+      this right after connecting, before any data command.
+    - "full" (default): INQUIRY_BINDING_STATUS (16), then GET_DEVICE_INFO
+      (32), then VERIFY_USER_NUMBER (19) -- the fuller connect-time sequence
+      observed in the app's own BLE debug log (see android-observations.md),
+      on the theory that the watch may need more than just VERIFY_USER_NUMBER
+      to treat the connection as a legitimate bound phone. SET_SYSTEM_TIME
+      (48) is deliberately omitted: its payload encoding was never captured
+      and guessing bytes for a stateful write isn't worth the risk here.
+
+    None of this is confirmed to reliably produce a legible notification --
+    see TODO.md. Returns the notification's response payload (the generic
+    ack/error-code shape documented in protocol.md, `{1: 178, 100: <code>}`)
+    for the caller to inspect/log -- this command was never seen live, only
+    reconstructed from the app's own bytecode, so nothing about its response
+    is assumed.
     """
+    if warmup not in ("none", "verify", "full"):
+        raise ValueError(f"unknown warmup mode: {warmup!r}")
     async with GatttoolSession(address) as session:
-        await session.send_message(protocol.encode_verify_user_number_request(user_id))
-        await session.receive_message()  # verify_result{verify_result_type, binding_status} -- not checked here
-        await asyncio.sleep(1.0)  # give the watch time to settle before the next write; see TODO.md
+        if warmup == "full":
+            await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
+            await session.receive_message()
+            await session.send_message(protocol.encode_request(protocol.CMD_GET_DEVICE_INFO))
+            await session.receive_message()
+        if warmup in ("verify", "full"):
+            await session.send_message(protocol.encode_verify_user_number_request(user_id))
+            await session.receive_message()  # verify_result{verify_result_type, binding_status} -- not checked here
+            await asyncio.sleep(1.0)  # give the watch time to settle before the next write; see TODO.md
         await session.send_message(
             protocol.encode_system_notification_request(notification_type, phone_number, contacts_info, message_text)
         )

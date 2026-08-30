@@ -593,6 +593,90 @@ but this is unconfirmed to reliably produce a legible notification —
 treat `notify` as "reaches the watch and is acknowledged" but not yet
 "reliably displays the intended content," regardless of the identify step.
 
+### 2026-08-30: classic-BT gating now the leading hypothesis, BLE-side preconditions ruled out
+
+`gatttool_transport.send_notification` gained a `warmup` parameter
+(`none`/`verify`/`full` — `full` adds `INQUIRY_BINDING_STATUS` (16) and
+`GET_DEVICE_INFO` (32) before `VERIFY_USER_NUMBER`, matching the fuller
+connect-time sequence seen in the app's own BLE debug log; see
+`android-observations.md`). Live-tested all three modes this session. Every
+mode that reached the notification write got the same clean
+`{1: 178, 100: 0}` ack (decoded: `08 b2 01 a0 06 00`, code 0 = success) —
+and the watch showed the **same fixed "please connect the BT in the
+phone's setting" prompt every time**, regardless of which preconditions
+preceded it. This rules out "missing precondition command" as the
+explanation: the notification is accepted and acked at the protocol level
+regardless of warmup mode, so the blocker is not in what BLE commands
+precede it.
+
+Separately, tried (with the user's sign-off) a direct diagnostic: does the
+watch's classic-BT (BR/EDR) link status gate this? The watch's model name
+now reads **"Beyond 3 pro Calling_0471"** — it markets classic-BT calling —
+and its own error text ("please connect the BT in the phone's setting")
+reads like a literal classic-BT pairing nag, not a generic error. Removing
+`~/.config/wireplumber/wireplumber.conf.d/52-zeblaze-watch-no-bt-audio.conf`
+(see `bluetooth-problems.md` #8) and restarting `wireplumber` let the
+watch's own periodic Hands-Free reconnect attempts reach `bluetoothd`
+again, but they now fail with `Permission denied (13)` (previously
+`Connection refused (111)`) — because problem #9's earlier fix removed the
+device's classic `[LinkKey]`, so there's no classic bond left to
+authenticate with. A plain `bluetoothctl connect`/`pair` (no device
+removal) both failed cleanly (`br-connection-refused`, `AlreadyExists`)
+without touching the LE bond. **Did not attempt a full classic re-pair**
+(would require removing the BlueZ device object first) — that specific
+operation is what caused the factory-reset recovery ordeal in
+`JOURNAL.md`'s 2026-08-29 "tried disabling BR/EDR" entry, and re-triggering
+it wasn't judged worth the risk just to test a hypothesis. WirePlumber's
+fix was reverted immediately after (confirmed: watch still `Bonded: yes`,
+zero Hands-Free retries afterward).
+
+**Net status**: classic-BT gating is now the leading hypothesis (matches
+the watch's own branding and error text, and no BLE-only precondition
+combination changes the outcome) but is **not proven** — the diagnostic
+above tested whether classic-BT *could* reconnect, not whether a
+successfully classic-connected session changes the notify outcome (that
+would need an actual classic re-pair, not attempted). If this turns out to
+be correct, pure-BLE notification display on this watch model may be
+architecturally impossible, not an unfound protocol trick.
+
+**Important prior evidence, re-surfaced**: `bluetooth-problems.md`
+problem #10 (2026-08-29, before the classic `LinkKey` was ever removed)
+already captured the classic **ACL link** fully connecting to the watch
+(`Connect Request` → `Accept Connection Request` → `Connect Complete`,
+repeated SDP browsing) while `notify` was tested — and the watch showed
+the same wrong prompt regardless. So bare classic-ACL connectivity is
+**already ruled out** as the fix; only a fully-negotiated Hands-Free
+*profile* (RFCOMM/SCO) session is an untested variable.
+
+**2026-08-30, later the same day**: attempted exactly that (with sign-off).
+A classic `[LinkKey]` (`Type=7`, unauthenticated "Just Works") had already
+re-appeared in this device's BlueZ bond by this point — apparently
+auto-derived via Cross-Transport Key Derivation from the LE bond at some
+point during the session's own connect/pair attempts, without any
+explicit re-pair. Re-enabling WirePlumber's Hands-Free role (temporarily)
+and trusting the device (`bluetoothctl trust`) still wasn't enough: the
+watch's own repeated classic reconnect attempts now fail with
+`Permission denied (13)` (previously `Connection refused (111)` before the
+LinkKey existed) — and a WirePlumber debug-log capture during one such
+failure showed **zero** Hands-Free-related activity, meaning `bluetoothd`
+rejects the connection in its own authorization/security-policy layer
+before ever routing it to WirePlumber. Best guess: the Hands-Free profile
+requires an authenticated (MITM-protected) link, which this "Just Works"
+key doesn't provide, and the watch (no display/keyboard) most likely can't
+do authenticated pairing at all. Not confirmed further — reverted
+WirePlumber back to the working problem-#8 config immediately after
+(confirmed: zero Hands-Free retries over a clean 45s window, bond still
+`Bonded: yes`). The classic `LinkKey` was left in place (harmless with the
+Hands-Free role disabled again) rather than stripped a second time.
+
+**Conclusion for now**: getting a genuine HFP-profile-connected classic
+session on this host looks like a real Bluetooth-security-policy wall, not
+a quick config fix. Combined with the already-ruled-out bare-ACL case
+above, testing "does a working classic link fix notify" from this host is
+looking increasingly impractical. The remaining live option is comparing
+against a real phone's actual behavior (see TODO.md idea #3) rather than
+reproducing classic HFP locally.
+
 ## No encryption, no pairing
 
 There is no **zero SMP packets** and zero LE-encryption events for

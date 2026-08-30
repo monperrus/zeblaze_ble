@@ -100,6 +100,12 @@ def parser() -> argparse.ArgumentParser:
     notify_command.add_argument("--sender", default="", help="contactsInfo: sender/caller name shown on the watch")
     notify_command.add_argument("--text", default="", help="messageText: body text (ignored for --type call)")
     notify_command.add_argument("--phone", default="", help="phoneNumber (relevant for --type call/miss_call)")
+    notify_command.add_argument(
+        "--warmup",
+        choices=("none", "verify", "full"),
+        default="full",
+        help="precondition commands to send before the notification (default: full)",
+    )
     notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     workout_command = commands.add_parser(
         "workout",
@@ -175,7 +181,12 @@ async def run(arguments: argparse.Namespace) -> int:
             "message": protocol.NOTIFICATION_TYPE_MESSAGE,
         }[arguments.type]
         response = await send_notification(
-            arguments.address, notification_type, arguments.phone, arguments.sender, arguments.text
+            arguments.address,
+            notification_type,
+            arguments.phone,
+            arguments.sender,
+            arguments.text,
+            warmup=arguments.warmup,
         )
         print(json.dumps({"response_hex": response.hex()}, indent=2))
         return 0
