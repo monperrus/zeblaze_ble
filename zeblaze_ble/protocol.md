@@ -118,6 +118,8 @@ Single-byte command ids observed live, sent as the protobuf payload
 | id (dec) | id (hex) | Name |
 |---|---|---|
 | 16 | `0x10` | `INQUIRY_BINDING_STATUS` |
+| 17 | `0x11` | `BINDING_CHECK` — see "Binding" below |
+| 18 | `0x12` | `BINDING_RESULT` — see "Binding" below |
 | 19 | `0x13` | `VERIFY_USER_NUMBER` (carries the server-side numeric user id as a string, not a secret) |
 | 32 | `0x20` | `GET_DEVICE_INFO` — bundles firmware/MAC/serial **and battery status** |
 | 33 | `0x21` | `GET_DEVICE_BATTERY` |
@@ -589,17 +591,58 @@ for every third-party notification.
 
 Live-tested 2026-08-30, BLE-only: acked `{1: 179, 100: 0}`
 (`08 b3 01 a0 06 00`) with **no** precondition commands, including
-multi-chunk payloads (~226 bytes → 2 chunks), and **displayed on the
-watch** (user-confirmed the same day) — unlike 178, which never displayed
-over a BLE-only link. This resolves the watch-side half of TODO.md's
-"notify" entry for app-style notifications: no classic-BT link and no
-warmup prelude is required for 179.
+multi-chunk payloads (~226 bytes → 2 chunks). **Ack ≠ display**: during
+the same session, every 179 was acked success while the watch showed one
+stale cached banner and discarded the new payloads — because the watch was
+in a user-id-mismatch bind state at the time (see "Binding" below). So the
+ack proves delivery to the watch's protocol layer only, and whether the
+watch *displays* the push is gated on a valid bind. Unlike 178, 179 was
+observed displaying real content once (the very first, pre-mismatch send).
 
-Known display quirk (fixed in the CLI): the watch draws its body line
-from **tickerText** and falls back to the title when tickerText is empty,
-which is what produced the "K: K" output for `--sender K` with an empty
-ticker. `app-notify` therefore defaults `--ticker` to `--text`; on the
-wire, always send a non-empty tickerText unless you want that fallback.
+An earlier note claimed the watch draws its body line from tickerText and
+falls back to the title; that was an artifact of the stale-banner session
+above, not a real rule, and has been retracted. The CLI's
+`--ticker`-defaults-to-`--text` behavior was kept (harmless, matches the
+real app, which always has a ticker from Android).
+
+## Binding: `BINDING_CHECK` (17) and `BINDING_RESULT` (18)
+
+Captured live 2026-08-30, from the official app's own BLE debug log while
+re-binding the watch after the user-id-mismatch state (see JOURNAL.md's
+2026-08-30 entry). Field numbers verified against the decompiled
+protobuf classes (`BindAccountProtos.SEBindAccount`: bindCheck = 2,
+bindResult = 3; `SEBindCheck`: bindCheckResult = 1, deviceVerify = 2,
+bindRandomKey = 3; `SEBindResult`: bindResultType = 1, userId = 2,
+phoneType = 3, and enums `SEBindResultType` REFUSE=1/OVER_TIME=2, so
+SUCCESS=0 by elimination, and `SEPhoneType` ANDROID=0/IOS=1).
+
+Bind sequence the real app runs:
+
+1. `INQUIRY_BINDING_STATUS` (16) → `request_binding_status: false` means
+   the watch considers itself unbound.
+2. `BINDING_CHECK` (17): `08 11 1a 04 12 02 08 01`
+   = `{1: 17, 3: {2: {2: {1: 1}}}}` — `SEBindAccount.bindCheck{
+   deviceVerify: true}`. (The smali overload with `deviceVerify=false`
+   instead sets `bindRandomKey`, used for the verify-by-key path.)
+3. `BINDING_RESULT` (18): `08 12 1a 0f 1a 0d 08 00 12 07 "2011999" 18 00`
+   = `{1: 18, 3: {3: {1: 0, 2: "2011999", 3: 0}}}` —
+   `SEBindAccount.bindResult{bindResultType: SUCCESS, userId,
+   phoneType: ANDROID}`.
+4. `INQUIRY_BINDING_STATUS` (16) → now `request_binding_status: true`.
+5. `VERIFY_USER_NUMBER` (19) → `verify_result_type: true`.
+
+`VERIFY_USER_NUMBER`'s reply `3a 04 08 00 10 01` decodes to
+`{7: {1: 0, 2: 1}}` = `verifyResult{verify_result_type: false,
+binding_status: true}` (SEBindAccount.verifyResult = field 7,
+SEVerifyResult: verifyResultType = 1, bindingStatus = 2). While
+`verify_result_type` is false the watch is in the user-id-mismatch state:
+commands still ack, but pushes are not displayed.
+
+**Not yet live-tested from this tool**: sending 17/18 ourselves to repair
+a broken bind over BLE-only (the 2026-08-30 attempt was blocked by the
+host's adapter going away mid-session). The exact bytes above are
+reproducible with `protocol.encode_field_varint`/`encode_field_bytes`;
+dedicated encoders are a natural next addition once tested.
 
 ## No encryption, no pairing
 
