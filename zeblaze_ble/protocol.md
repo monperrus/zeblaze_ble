@@ -4,7 +4,7 @@ This is the documentation the wire protocol to talk to Zebaze Watches
 the Zeblaze Beyond 3 Pro.
 
 The app's own SDK version string for this is `ZH_SDK_20260730_V2.3.9`, hence
-"ZH_SDK" as the name here.
+"ZH_SDK" as the name here. The protocol version is called "Apricot".
 
 ## GATT layout
 
@@ -595,10 +595,11 @@ over a BLE-only link. This resolves the watch-side half of TODO.md's
 "notify" entry for app-style notifications: no classic-BT link and no
 warmup prelude is required for 179.
 
-Known display quirk: for short texts the watch has shown the title
-duplicated as the body ("K: K" for `--sender K --text K`). The watch's
-firmware appears to fall back to the title when the body is very short;
-send a body longer than a couple of characters to get distinct lines.
+Known display quirk (fixed in the CLI): the watch draws its body line
+from **tickerText** and falls back to the title when tickerText is empty,
+which is what produced the "K: K" output for `--sender K` with an empty
+ticker. `app-notify` therefore defaults `--ticker` to `--text`; on the
+wire, always send a non-empty tickerText unless you want that fallback.
 
 ## No encryption, no pairing
 

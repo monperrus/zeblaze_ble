@@ -133,10 +133,10 @@ zeblaze-ble app-notify <ADDRESS> --app "Signal" --sender "Eve" --text "integrati
 Sends `SEND_APP_NOTIFICATION` (command id 179) — the exact path the official
 app itself uses for every third-party notification, recovered from the
 decompiled APK (`ControlBleTools.sendAppNotification`). Takes `--app`
-(appName), `--sender` (title), `--text` (body), `--page` (pageName), and
-`--attempts` (default 8, for the same BLE ack flakiness every write
-command shares). No precondition commands are sent — live testing showed
-they're not needed.
+(appName), `--sender` (title), `--text` (body), `--ticker` (tickerText,
+defaults to `--text`), `--page` (pageName), and `--attempts` (default 8,
+for the same BLE ack flakiness every write command shares). No
+precondition commands are sent — live testing showed they're not needed.
 
 Live-tested 2026-08-30: acked with the protocol success code every time,
 including multi-chunk payloads, **and displayed on the watch** — the
@@ -144,9 +144,11 @@ first notification variant confirmed to display over a BLE-only link.
 The title/ticker are capped at 50 chars and the text at 200 by the
 encoder, exactly as the official app caps them.
 
-Tip: give `--text` a real body. With a one-character body the watch has
-been observed duplicating the title as the body ("K: K" for
-`--sender K --text K`).
+The watch draws its body line from **tickerText**, not `text`, and falls
+back to the title when tickerText is empty — that fallback is what
+produced the early "K: K" output (`--sender K` with an empty ticker).
+`--ticker` therefore defaults to `--text` so the body is never empty;
+pass `--ticker ""` explicitly if you really want the title duplicated.
 
 ### Workout data: steps, GPS track, heart rate
 

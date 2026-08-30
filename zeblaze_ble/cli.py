@@ -111,6 +111,11 @@ def parser() -> argparse.ArgumentParser:
     app_notify_command.add_argument("--app", default="Messages", help="appName shown on the watch")
     app_notify_command.add_argument("--sender", default="", help="title: sender/title line shown on the watch")
     app_notify_command.add_argument("--text", default="", help="text: body text")
+    app_notify_command.add_argument(
+        "--ticker",
+        default=None,
+        help="tickerText: what the watch draws as the body line (default: same as --text)",
+    )
     app_notify_command.add_argument("--page", default="", help="pageName (unused by the app for third-party notifications)")
     app_notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
     app_notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
@@ -199,12 +204,17 @@ async def run(arguments: argparse.Namespace) -> int:
         return 0
 
     if arguments.command == "app-notify":
+        # The watch renders its body line from tickerText and falls back to
+        # the title when it is empty -- so never send an empty ticker; the
+        # real app always has one (Android's ticker is "sender: message").
+        ticker_text = arguments.ticker if arguments.ticker is not None else arguments.text
         response = await send_app_notification(
             arguments.address,
             arguments.app,
             arguments.page,
             arguments.sender,
             arguments.text,
+            ticker_text,
             attempts=arguments.attempts,
         )
         print(json.dumps({"response_hex": response.hex()}, indent=2))
