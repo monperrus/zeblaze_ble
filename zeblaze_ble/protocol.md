@@ -558,124 +558,22 @@ always forces `messageText` to `""` regardless of what's passed —
 
 The real app always sends `VERIFY_USER_NUMBER` (19, see "Other command
 payloads seen but not decoded" above) immediately after connecting, before
-any data command — every bare `zeblaze-ble notify`/`battery`/etc. call
-skips this and connects straight to the data command. `send_notification`
-was changed to send `VERIFY_USER_NUMBER` (with this watch's known bound
-user id, `"2011999"`, pulled from `info_fit.xml` — see
-android-observations.md) first, in the same connection, before the
-notification.
+any data command. `gatttool_transport.send_notification` takes a `warmup`
+parameter (`none`/`verify`/`full` — `verify` sends `VERIFY_USER_NUMBER`
+first; `full` also adds `INQUIRY_BINDING_STATUS` (16) and
+`GET_DEVICE_INFO` (32) before it, matching the fuller connect-time
+sequence seen in the app's own BLE debug log, see
+`android-observations.md`) to let a caller replicate that. Confirmed live:
+every mode gets the same `{1: 178, 100: 0}` ack (`08 b2 01 a0 06 00`, code
+0 = success) — the ack does not depend on which of these BLE commands, if
+any, precede the notification.
 
-**Result: this changed the watch's behavior, but not to the desired
-outcome, and not consistently.** Three live trials, same code path
-(`VERIFY_USER_NUMBER` → notification, `--type message`, empty
-`phoneNumber`, varying `text`), same watch, same session:
-
-1. No delay between the two writes: watch showed **"Incoming call"**
-   (wrong UI, but a *different* wrong UI than before — evidence the
-   identify step does change something).
-2. No delay, `phoneNumber` populated this time: watch showed the *original*
-   **"please connect the BT in the phone's setting"** prompt again.
-3. A 1-second `asyncio.sleep` added between the two writes (hypothesis: a
-   race where the notification arrives before the watch finishes
-   processing the verify ack): inconclusive — repeated general BLE
-   transport flakiness made it
-   impossible to get a second clean trial before the investigation was
-   paused for this session.
-
-Given (1) and (2) used the *identical* code path and differed only in
-`phoneNumber` content yet produced different UI outcomes, the phoneNumber
-content is not a clean explanation by itself — a timing race between the
-verify ack and the notification write (per the delay hypothesis in trial
-3), or some other session state, is at least as plausible. **Not resolved
-this session.** `gatttool_transport.send_notification` keeps the
-verify-first sequence and the 1-second delay as the current best attempt,
-but this is unconfirmed to reliably produce a legible notification —
-treat `notify` as "reaches the watch and is acknowledged" but not yet
-"reliably displays the intended content," regardless of the identify step.
-
-### 2026-08-30: classic-BT gating now the leading hypothesis, BLE-side preconditions ruled out
-
-`gatttool_transport.send_notification` gained a `warmup` parameter
-(`none`/`verify`/`full` — `full` adds `INQUIRY_BINDING_STATUS` (16) and
-`GET_DEVICE_INFO` (32) before `VERIFY_USER_NUMBER`, matching the fuller
-connect-time sequence seen in the app's own BLE debug log; see
-`android-observations.md`). Live-tested all three modes this session. Every
-mode that reached the notification write got the same clean
-`{1: 178, 100: 0}` ack (decoded: `08 b2 01 a0 06 00`, code 0 = success) —
-and the watch showed the **same fixed "please connect the BT in the
-phone's setting" prompt every time**, regardless of which preconditions
-preceded it. This rules out "missing precondition command" as the
-explanation: the notification is accepted and acked at the protocol level
-regardless of warmup mode, so the blocker is not in what BLE commands
-precede it.
-
-Separately, tried (with the user's sign-off) a direct diagnostic: does the
-watch's classic-BT (BR/EDR) link status gate this? The watch's model name
-now reads **"Beyond 3 pro Calling_0471"** — it markets classic-BT calling —
-and its own error text ("please connect the BT in the phone's setting")
-reads like a literal classic-BT pairing nag, not a generic error. Removing
-`~/.config/wireplumber/wireplumber.conf.d/52-zeblaze-watch-no-bt-audio.conf`
-(see `bluetooth-problems.md` #8) and restarting `wireplumber` let the
-watch's own periodic Hands-Free reconnect attempts reach `bluetoothd`
-again, but they now fail with `Permission denied (13)` (previously
-`Connection refused (111)`) — because problem #9's earlier fix removed the
-device's classic `[LinkKey]`, so there's no classic bond left to
-authenticate with. A plain `bluetoothctl connect`/`pair` (no device
-removal) both failed cleanly (`br-connection-refused`, `AlreadyExists`)
-without touching the LE bond. **Did not attempt a full classic re-pair**
-(would require removing the BlueZ device object first) — that specific
-operation is what caused the factory-reset recovery ordeal in
-`JOURNAL.md`'s 2026-08-29 "tried disabling BR/EDR" entry, and re-triggering
-it wasn't judged worth the risk just to test a hypothesis. WirePlumber's
-fix was reverted immediately after (confirmed: watch still `Bonded: yes`,
-zero Hands-Free retries afterward).
-
-**Net status**: classic-BT gating is now the leading hypothesis (matches
-the watch's own branding and error text, and no BLE-only precondition
-combination changes the outcome) but is **not proven** — the diagnostic
-above tested whether classic-BT *could* reconnect, not whether a
-successfully classic-connected session changes the notify outcome (that
-would need an actual classic re-pair, not attempted). If this turns out to
-be correct, pure-BLE notification display on this watch model may be
-architecturally impossible, not an unfound protocol trick.
-
-**Important prior evidence, re-surfaced**: `bluetooth-problems.md`
-problem #10 (2026-08-29, before the classic `LinkKey` was ever removed)
-already captured the classic **ACL link** fully connecting to the watch
-(`Connect Request` → `Accept Connection Request` → `Connect Complete`,
-repeated SDP browsing) while `notify` was tested — and the watch showed
-the same wrong prompt regardless. So bare classic-ACL connectivity is
-**already ruled out** as the fix; only a fully-negotiated Hands-Free
-*profile* (RFCOMM/SCO) session is an untested variable.
-
-**2026-08-30, later the same day**: attempted exactly that (with sign-off).
-A classic `[LinkKey]` (`Type=7`, unauthenticated "Just Works") had already
-re-appeared in this device's BlueZ bond by this point — apparently
-auto-derived via Cross-Transport Key Derivation from the LE bond at some
-point during the session's own connect/pair attempts, without any
-explicit re-pair. Re-enabling WirePlumber's Hands-Free role (temporarily)
-and trusting the device (`bluetoothctl trust`) still wasn't enough: the
-watch's own repeated classic reconnect attempts now fail with
-`Permission denied (13)` (previously `Connection refused (111)` before the
-LinkKey existed) — and a WirePlumber debug-log capture during one such
-failure showed **zero** Hands-Free-related activity, meaning `bluetoothd`
-rejects the connection in its own authorization/security-policy layer
-before ever routing it to WirePlumber. Best guess: the Hands-Free profile
-requires an authenticated (MITM-protected) link, which this "Just Works"
-key doesn't provide, and the watch (no display/keyboard) most likely can't
-do authenticated pairing at all. Not confirmed further — reverted
-WirePlumber back to the working problem-#8 config immediately after
-(confirmed: zero Hands-Free retries over a clean 45s window, bond still
-`Bonded: yes`). The classic `LinkKey` was left in place (harmless with the
-Hands-Free role disabled again) rather than stripped a second time.
-
-**Conclusion for now**: getting a genuine HFP-profile-connected classic
-session on this host looks like a real Bluetooth-security-policy wall, not
-a quick config fix. Combined with the already-ruled-out bare-ACL case
-above, testing "does a working classic link fix notify" from this host is
-looking increasingly impractical. The remaining live option is comparing
-against a real phone's actual behavior (see TODO.md idea #3) rather than
-reproducing classic HFP locally.
+**Live-tested, still unresolved**: whether/when the watch actually
+*displays* the notification's content is a separate question from the ack
+above, and is not yet understood — investigation history and current
+hypotheses live in `TODO.md`'s "notify" entry (and `JOURNAL.md` for the
+narrative); local-Bluetooth-stack diagnostics attempted along the way are
+in `bluetooth-problems.md`.
 
 ## No encryption, no pairing
 
