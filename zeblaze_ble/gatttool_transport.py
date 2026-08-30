@@ -419,7 +419,10 @@ async def request_current_heart_rate(address: str, seconds: float = 30, attempts
 # info_fit.xml (USER_ID) during the 2026-08-29 session -- see
 # android-observations.md. Not a secret (it's the account's own numeric
 # id, sent in cleartext by the real app on every connect), but specific to
-# this one watch/account pairing; pass user_id explicitly for a different one.
+# this one watch/account pairing. Kept for reference even though the
+# VERIFY_USER_NUMBER prelude that used it was removed from the
+# notification senders (2026-08-30): live testing showed it changes
+# neither the ack nor the watch's display behavior.
 _BOUND_USER_ID = "2011999"
 
 
@@ -429,55 +432,30 @@ async def send_notification(
     phone_number: str = "",
     contacts_info: str = "",
     message_text: str = "",
-    user_id: str = _BOUND_USER_ID,
-    warmup: str = "full",
     attempts: int = 8,
 ) -> bytes:
     """Connect and push a SEND_SYSTEM_NOTIFICATION (178) to the watch.
 
-    `warmup` controls which precondition commands are sent before the
-    notification, in the same connection -- an attempt to fix a
-    2026-08-29-observed problem: a bare notification-only connection gets a
-    protocol-level ack but the watch shows a fixed "please connect the BT in
-    the phone's setting" prompt instead of the real content. This is BLE-only
-    (no classic-Bluetooth pairing) by design; see TODO.md's "notify" entry
-    for the live-test history, including the (inconclusive) hypothesis that
-    the watch's firmware may gate notification display on a classic-BT link
-    regardless of what's sent over BLE.
+    Live-tested 2026-08-29/30: the watch acks every 178 write with
+    `{1: 178, 100: 0}` regardless of which precondition commands (if any)
+    precede it, and never reliably displayed the content over a BLE-only
+    link -- see TODO.md's "notify" entry. The former `warmup` parameter
+    (VERIFY_USER_NUMBER / INQUIRY_BINDING_STATUS / GET_DEVICE_INFO preludes)
+    was removed 2026-08-30: it changed nothing observable and each extra
+    prelude command was itself a source of the pre-existing ack flakiness.
 
-    - "none": just the notification, nothing else (the original bare path).
-    - "verify": VERIFY_USER_NUMBER (19) first -- the real app always sends
-      this right after connecting, before any data command.
-    - "full" (default): INQUIRY_BINDING_STATUS (16), then GET_DEVICE_INFO
-      (32), then VERIFY_USER_NUMBER (19) -- the fuller connect-time sequence
-      observed in the app's own BLE debug log (see android-observations.md),
-      on the theory that the watch may need more than just VERIFY_USER_NUMBER
-      to treat the connection as a legitimate bound phone. SET_SYSTEM_TIME
-      (48) is deliberately omitted: its payload encoding was never captured
-      and guessing bytes for a stateful write isn't worth the risk here.
+    Returns the notification's response payload (the generic ack/error-code
+    shape documented in protocol.md, `{1: 178, 100: <code>}`) for the caller
+    to inspect/log -- this command was never seen live, only reconstructed
+    from the app's own bytecode, so nothing about its response is assumed.
 
-    None of this is confirmed to reliably produce a legible notification --
-    see TODO.md. Returns the notification's response payload (the generic
-    ack/error-code shape documented in protocol.md, `{1: 178, 100: <code>}`)
-    for the caller to inspect/log -- this command was never seen live, only
-    reconstructed from the app's own bytecode, so nothing about its response
-    is assumed.
+    Retries transient `TimeoutError`/`ConnectionError` up to `attempts`
+    times, 5s apart.
     """
-    if warmup not in ("none", "verify", "full"):
-        raise ValueError(f"unknown warmup mode: {warmup!r}")
     last_error: Exception | None = None
     for _ in range(max(1, attempts)):
         try:
             async with GatttoolSession(address) as session:
-                if warmup == "full":
-                    await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
-                    await session.receive_message()
-                    await session.send_message(protocol.encode_request(protocol.CMD_GET_DEVICE_INFO))
-                    await session.receive_message()
-                if warmup in ("verify", "full"):
-                    await session.send_message(protocol.encode_verify_user_number_request(user_id))
-                    await session.receive_message()  # verify_result{verify_result_type, binding_status} -- not checked here
-                    await asyncio.sleep(1.0)  # give the watch time to settle before the next write; see TODO.md
                 await session.send_message(
                     protocol.encode_system_notification_request(
                         notification_type, phone_number, contacts_info, message_text
@@ -498,8 +476,6 @@ async def send_app_notification(
     title: str = "",
     text: str = "",
     ticker_text: str = "",
-    user_id: str = _BOUND_USER_ID,
-    warmup: str = "none",
     attempts: int = 8,
 ) -> bytes:
     """Connect and push a SEND_APP_NOTIFICATION (179) to the watch.
@@ -507,34 +483,19 @@ async def send_app_notification(
     The app-notification sibling of `send_notification` (178): the path the
     official app itself uses for every third-party notification (WhatsApp,
     Slack, ...), via MyNotificationsService -> ControlBleTools.sendAppNotification
-    -> com.zhapp.ble.a.a(179, ...).
-
-    `warmup` defaults to "none" (unlike `send_notification`): live-tested
-    2026-08-30, the bare path is acked `{1: 179, 100: 0}` just like every
-    warmup mode, and the watch's connect-time state machine is itself a
-    source of the pre-existing ack flakiness -- each extra prelude command
-    is one more chance to stall. Send prelude commands only if you need
-    them for a separate experiment.
+    -> com.zhapp.ble.a.a(179, ...). Live-tested 2026-08-30, BLE-only: acked
+    `{1: 179, 100: 0}` and displayed on the watch (user-confirmed), with no
+    precondition commands needed -- none are sent, matching the removal of
+    `send_notification`'s `warmup` the same day.
 
     Retries transient `TimeoutError`/`ConnectionError` (the flakiness
     documented for every other write command, see TODO.md's "BLE flakiness"
     entry) up to `attempts` times, 5s apart.
     """
-    if warmup not in ("none", "verify", "full"):
-        raise ValueError(f"unknown warmup mode: {warmup!r}")
     last_error: Exception | None = None
     for _ in range(max(1, attempts)):
         try:
             async with GatttoolSession(address) as session:
-                if warmup == "full":
-                    await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
-                    await session.receive_message()
-                    await session.send_message(protocol.encode_request(protocol.CMD_GET_DEVICE_INFO))
-                    await session.receive_message()
-                if warmup in ("verify", "full"):
-                    await session.send_message(protocol.encode_verify_user_number_request(user_id))
-                    await session.receive_message()
-                    await asyncio.sleep(1.0)
                 await session.send_message(
                     protocol.encode_app_notification_request(app_name, page_name, title, text, ticker_text)
                 )

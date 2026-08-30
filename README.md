@@ -114,16 +114,15 @@ zeblaze-ble notify <ADDRESS> --type call --phone "+1234567890" --sender "Alice" 
 zeblaze-ble notify <ADDRESS> --type miss_call --phone "+1234567890" --sender "Alice" --i-understand-this-writes
 ```
 
-Sends `SEND_SYSTEM_NOTIFICATION` (command id 178). 
+Sends `SEND_SYSTEM_NOTIFICATION` (command id 178).
 
 **Known limitation, confirmed live, unresolved**: the watch acks this
 command as successful every time, but a bare connection's notification is
 not reliably displayed — the watch shows a fixed system prompt instead
-("please connect the BT in the phone's setting"). Staying BLE-only (no
-classic-Bluetooth pairing) per project preference, `send_notification` now
-also sends `VERIFY_USER_NUMBER` first, matching what the real app always
-does on connect and this tool previously skipped — this measurably changes
-the watch's behavior.
+("please connect the BT in the phone's setting"). A `--warmup` prelude
+(`VERIFY_USER_NUMBER` etc., matching the real app's connect sequence) was
+tried and removed 2026-08-30: it changed neither the ack nor the display.
+For text notifications that actually display, use `app-notify` below.
 
 ### App-style notifications (WhatsApp/Slack-like)
 
@@ -134,16 +133,20 @@ zeblaze-ble app-notify <ADDRESS> --app "Signal" --sender "Eve" --text "integrati
 Sends `SEND_APP_NOTIFICATION` (command id 179) — the exact path the official
 app itself uses for every third-party notification, recovered from the
 decompiled APK (`ControlBleTools.sendAppNotification`). Takes `--app`
-(appName), `--sender` (title), `--text`, `--page` (pageName), `--warmup`
-(`none` default / `verify` / `full`), and `--attempts` (default 8, for the
-same BLE ack flakiness every write command shares).
+(appName), `--sender` (title), `--text` (body), `--page` (pageName), and
+`--attempts` (default 8, for the same BLE ack flakiness every write
+command shares). No precondition commands are sent — live testing showed
+they're not needed.
 
-The title/ticker are capped at 50 chars and the text at 200 by the encoder,
-exactly as the official app caps them. Live-tested 2026-08-30: acked with
-the protocol success code every time, including multi-chunk payloads. As
-with `notify` above, the ack proves delivery to the watch's command
-handler; on-screen display depends on the watch's state (see the same
-known limitation).
+Live-tested 2026-08-30: acked with the protocol success code every time,
+including multi-chunk payloads, **and displayed on the watch** — the
+first notification variant confirmed to display over a BLE-only link.
+The title/ticker are capped at 50 chars and the text at 200 by the
+encoder, exactly as the official app caps them.
+
+Tip: give `--text` a real body. With a one-character body the watch has
+been observed duplicating the title as the body ("K: K" for
+`--sender K --text K`).
 
 ### Workout data: steps, GPS track, heart rate
 

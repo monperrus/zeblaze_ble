@@ -559,15 +559,13 @@ always forces `messageText` to `""` regardless of what's passed —
 
 The real app always sends `VERIFY_USER_NUMBER` (19, see "Other command
 payloads seen but not decoded" above) immediately after connecting, before
-any data command. `gatttool_transport.send_notification` takes a `warmup`
-parameter (`none`/`verify`/`full` — `verify` sends `VERIFY_USER_NUMBER`
-first; `full` also adds `INQUIRY_BINDING_STATUS` (16) and
-`GET_DEVICE_INFO` (32) before it, matching the fuller connect-time
-sequence seen in the app's own BLE debug log, see
-`android-observations.md`) to let a caller replicate that. Confirmed live:
-every mode gets the same `{1: 178, 100: 0}` ack (`08 b2 01 a0 06 00`, code
+any data command. `gatttool_transport.send_notification` once had a
+`warmup` parameter (`none`/`verify`/`full`) replicating that prelude; it
+was removed 2026-08-30 after live testing across all three modes showed
+every one gets the same `{1: 178, 100: 0}` ack (`08 b2 01 a0 06 00`, code
 0 = success) — the ack does not depend on which of these BLE commands, if
-any, precede the notification.
+any, precede the notification — and each extra prelude command was itself
+a source of the documented ack flakiness.
 
 **Live-tested, still unresolved**: whether/when the watch actually
 *displays* the notification's content is a separate question from the ack
@@ -581,9 +579,26 @@ in `bluetooth-problems.md`.
 Structure: `{1: 179, 13: {2: {1: appName, 2: pageName, 3: title, 4: text,
 5: tickerText}}}` — the same `SEWear` envelope and field 13 as 178, but
 holding `SENotification{2: SEAppNotification{...}}` (appNotification is
-field 2 of `SENotification`; systemNotification is field 1). The app truncates title/ticker at 50 chars and text at 200
+field 2 of `SENotification`; systemNotification is field 1). The app
+truncates title/ticker at 50 chars and text at 200
 (`BleUtils.truncateString`: `s[:max-1] + "..."`), which
 `protocol.encode_app_notification_request` replicates byte-for-byte.
+Recovered from the decompiled APK (`ControlBleTools.sendAppNotification`
+-> `com.zhapp.ble.a.a(179, ...)`) — the command the real app itself uses
+for every third-party notification.
+
+Live-tested 2026-08-30, BLE-only: acked `{1: 179, 100: 0}`
+(`08 b3 01 a0 06 00`) with **no** precondition commands, including
+multi-chunk payloads (~226 bytes → 2 chunks), and **displayed on the
+watch** (user-confirmed the same day) — unlike 178, which never displayed
+over a BLE-only link. This resolves the watch-side half of TODO.md's
+"notify" entry for app-style notifications: no classic-BT link and no
+warmup prelude is required for 179.
+
+Known display quirk: for short texts the watch has shown the title
+duplicated as the body ("K: K" for `--sender K --text K`). The watch's
+firmware appears to fall back to the title when the body is very short;
+send a body longer than a couple of characters to get distinct lines.
 
 ## No encryption, no pairing
 

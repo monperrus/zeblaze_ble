@@ -101,12 +101,7 @@ def parser() -> argparse.ArgumentParser:
     notify_command.add_argument("--sender", default="", help="contactsInfo: sender/caller name shown on the watch")
     notify_command.add_argument("--text", default="", help="messageText: body text (ignored for --type call)")
     notify_command.add_argument("--phone", default="", help="phoneNumber (relevant for --type call/miss_call)")
-    notify_command.add_argument(
-        "--warmup",
-        choices=("none", "verify", "full"),
-        default="full",
-        help="precondition commands to send before the notification (default: full)",
-    )
+    notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
     notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     app_notify_command = commands.add_parser(
         "app-notify",
@@ -117,12 +112,6 @@ def parser() -> argparse.ArgumentParser:
     app_notify_command.add_argument("--sender", default="", help="title: sender/title line shown on the watch")
     app_notify_command.add_argument("--text", default="", help="text: body text")
     app_notify_command.add_argument("--page", default="", help="pageName (unused by the app for third-party notifications)")
-    app_notify_command.add_argument(
-        "--warmup",
-        choices=("none", "verify", "full"),
-        default="none",
-        help="precondition commands to send before the notification (default: none)",
-    )
     app_notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
     app_notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     workout_command = commands.add_parser(
@@ -204,7 +193,7 @@ async def run(arguments: argparse.Namespace) -> int:
             arguments.phone,
             arguments.sender,
             arguments.text,
-            warmup=arguments.warmup,
+            attempts=arguments.attempts,
         )
         print(json.dumps({"response_hex": response.hex()}, indent=2))
         return 0
@@ -216,7 +205,6 @@ async def run(arguments: argparse.Namespace) -> int:
             arguments.page,
             arguments.sender,
             arguments.text,
-            warmup=arguments.warmup,
             attempts=arguments.attempts,
         )
         print(json.dumps({"response_hex": response.hex()}, indent=2))
