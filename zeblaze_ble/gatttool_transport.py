@@ -431,6 +431,7 @@ async def send_notification(
     message_text: str = "",
     user_id: str = _BOUND_USER_ID,
     warmup: str = "full",
+    attempts: int = 8,
 ) -> bytes:
     """Connect and push a SEND_SYSTEM_NOTIFICATION (178) to the watch.
 
@@ -464,20 +465,85 @@ async def send_notification(
     """
     if warmup not in ("none", "verify", "full"):
         raise ValueError(f"unknown warmup mode: {warmup!r}")
-    async with GatttoolSession(address) as session:
-        if warmup == "full":
-            await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
-            await session.receive_message()
-            await session.send_message(protocol.encode_request(protocol.CMD_GET_DEVICE_INFO))
-            await session.receive_message()
-        if warmup in ("verify", "full"):
-            await session.send_message(protocol.encode_verify_user_number_request(user_id))
-            await session.receive_message()  # verify_result{verify_result_type, binding_status} -- not checked here
-            await asyncio.sleep(1.0)  # give the watch time to settle before the next write; see TODO.md
-        await session.send_message(
-            protocol.encode_system_notification_request(notification_type, phone_number, contacts_info, message_text)
-        )
-        return await session.receive_message()
+    last_error: Exception | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            async with GatttoolSession(address) as session:
+                if warmup == "full":
+                    await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
+                    await session.receive_message()
+                    await session.send_message(protocol.encode_request(protocol.CMD_GET_DEVICE_INFO))
+                    await session.receive_message()
+                if warmup in ("verify", "full"):
+                    await session.send_message(protocol.encode_verify_user_number_request(user_id))
+                    await session.receive_message()  # verify_result{verify_result_type, binding_status} -- not checked here
+                    await asyncio.sleep(1.0)  # give the watch time to settle before the next write; see TODO.md
+                await session.send_message(
+                    protocol.encode_system_notification_request(
+                        notification_type, phone_number, contacts_info, message_text
+                    )
+                )
+                return await session.receive_message()
+        except (ConnectionError, RuntimeError, TimeoutError, asyncio.TimeoutError) as error:
+            last_error = error
+            await asyncio.sleep(5.0)
+    assert last_error is not None
+    raise last_error
+
+
+async def send_app_notification(
+    address: str,
+    app_name: str = "",
+    page_name: str = "",
+    title: str = "",
+    text: str = "",
+    ticker_text: str = "",
+    user_id: str = _BOUND_USER_ID,
+    warmup: str = "none",
+    attempts: int = 8,
+) -> bytes:
+    """Connect and push a SEND_APP_NOTIFICATION (179) to the watch.
+
+    The app-notification sibling of `send_notification` (178): the path the
+    official app itself uses for every third-party notification (WhatsApp,
+    Slack, ...), via MyNotificationsService -> ControlBleTools.sendAppNotification
+    -> com.zhapp.ble.a.a(179, ...).
+
+    `warmup` defaults to "none" (unlike `send_notification`): live-tested
+    2026-08-30, the bare path is acked `{1: 179, 100: 0}` just like every
+    warmup mode, and the watch's connect-time state machine is itself a
+    source of the pre-existing ack flakiness -- each extra prelude command
+    is one more chance to stall. Send prelude commands only if you need
+    them for a separate experiment.
+
+    Retries transient `TimeoutError`/`ConnectionError` (the flakiness
+    documented for every other write command, see TODO.md's "BLE flakiness"
+    entry) up to `attempts` times, 5s apart.
+    """
+    if warmup not in ("none", "verify", "full"):
+        raise ValueError(f"unknown warmup mode: {warmup!r}")
+    last_error: Exception | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            async with GatttoolSession(address) as session:
+                if warmup == "full":
+                    await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
+                    await session.receive_message()
+                    await session.send_message(protocol.encode_request(protocol.CMD_GET_DEVICE_INFO))
+                    await session.receive_message()
+                if warmup in ("verify", "full"):
+                    await session.send_message(protocol.encode_verify_user_number_request(user_id))
+                    await session.receive_message()
+                    await asyncio.sleep(1.0)
+                await session.send_message(
+                    protocol.encode_app_notification_request(app_name, page_name, title, text, ticker_text)
+                )
+                return await session.receive_message()
+        except (ConnectionError, RuntimeError, TimeoutError, asyncio.TimeoutError) as error:
+            last_error = error
+            await asyncio.sleep(5.0)
+    assert last_error is not None
+    raise last_error
 
 
 async def request_workout_data(address: str) -> protocol.WorkoutData:

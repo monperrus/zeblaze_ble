@@ -19,6 +19,7 @@ from .gatttool_transport import (
     request_device_info,
     request_fitness_data,
     request_workout_data,
+    send_app_notification,
     send_notification,
 )
 from .linux_gatt import inspect as inspect_gatttool
@@ -107,6 +108,23 @@ def parser() -> argparse.ArgumentParser:
         help="precondition commands to send before the notification (default: full)",
     )
     notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    app_notify_command = commands.add_parser(
+        "app-notify",
+        help="push an app-style notification (like WhatsApp/Slack) to the watch (performs a protocol write)",
+    )
+    app_notify_command.add_argument("address")
+    app_notify_command.add_argument("--app", default="Messages", help="appName shown on the watch")
+    app_notify_command.add_argument("--sender", default="", help="title: sender/title line shown on the watch")
+    app_notify_command.add_argument("--text", default="", help="text: body text")
+    app_notify_command.add_argument("--page", default="", help="pageName (unused by the app for third-party notifications)")
+    app_notify_command.add_argument(
+        "--warmup",
+        choices=("none", "verify", "full"),
+        default="none",
+        help="precondition commands to send before the notification (default: none)",
+    )
+    app_notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
+    app_notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     workout_command = commands.add_parser(
         "workout",
         help="fetch queued workout data (summary, GPS track) from the watch (performs protocol writes)",
@@ -191,7 +209,18 @@ async def run(arguments: argparse.Namespace) -> int:
         print(json.dumps({"response_hex": response.hex()}, indent=2))
         return 0
 
-    if arguments.command == "workout":
+    if arguments.command == "app-notify":
+        response = await send_app_notification(
+            arguments.address,
+            arguments.app,
+            arguments.page,
+            arguments.sender,
+            arguments.text,
+            warmup=arguments.warmup,
+            attempts=arguments.attempts,
+        )
+        print(json.dumps({"response_hex": response.hex()}, indent=2))
+        return 0
         data = await request_workout_data(arguments.address)
         result = {
             "entries": [_jsonable(entry) for entry in data.entries],

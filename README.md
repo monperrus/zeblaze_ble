@@ -125,6 +125,26 @@ also sends `VERIFY_USER_NUMBER` first, matching what the real app always
 does on connect and this tool previously skipped — this measurably changes
 the watch's behavior.
 
+### App-style notifications (WhatsApp/Slack-like)
+
+```bash
+zeblaze-ble app-notify <ADDRESS> --app "Signal" --sender "Eve" --text "integration test" --i-understand-this-writes
+```
+
+Sends `SEND_APP_NOTIFICATION` (command id 179) — the exact path the official
+app itself uses for every third-party notification, recovered from the
+decompiled APK (`ControlBleTools.sendAppNotification`). Takes `--app`
+(appName), `--sender` (title), `--text`, `--page` (pageName), `--warmup`
+(`none` default / `verify` / `full`), and `--attempts` (default 8, for the
+same BLE ack flakiness every write command shares).
+
+The title/ticker are capped at 50 chars and the text at 200 by the encoder,
+exactly as the official app caps them. Live-tested 2026-08-30: acked with
+the protocol success code every time, including multi-chunk payloads. As
+with `notify` above, the ack proves delivery to the watch's command
+handler; on-screen display depends on the watch's state (see the same
+known limitation).
+
 ### Workout data: steps, GPS track, heart rate
 
 ```bash

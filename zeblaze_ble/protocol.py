@@ -46,6 +46,16 @@ NOTIFICATION_TYPE_CALL = 0
 NOTIFICATION_TYPE_MISS_CALL = 1
 NOTIFICATION_TYPE_MESSAGE = 2
 
+# SEND_APP_NOTIFICATION (179), the "Apricot"-protocol branch of
+# ControlBleTools.sendAppNotification -- see encode_app_notification_request.
+CMD_SEND_APP_NOTIFICATION = 179
+
+# Field-length caps the official app itself applies before sending an app
+# notification (ControlBleTools.sendAppNotification -> BleUtils.truncateString):
+# title/ticker capped at 50, text at 200 (result is 49/199 chars + "...").
+APP_NOTIFICATION_TITLE_MAX = 50
+APP_NOTIFICATION_TEXT_MAX = 200
+
 # Low 2 bits of a sport-entry id's last byte (see SportEntryId below).
 SPORT_DATA_POINT = 0  # per-interval samples, structure not decoded (see protocol.md)
 SPORT_DATA_REPORT = 1  # workout summary -> WorkoutReport
@@ -193,6 +203,40 @@ def encode_system_notification_request(
     )
     notification = encode_field_bytes(1, system_notification)
     return encode_field_varint(1, CMD_SEND_SYSTEM_NOTIFICATION) + encode_field_bytes(13, notification)
+
+
+def encode_app_notification_request(
+    app_name: str = "", page_name: str = "", title: str = "", text: str = "", ticker_text: str = ""
+) -> bytes:
+    """Build a SEND_APP_NOTIFICATION (179) request.
+
+    Same provenance as `encode_system_notification_request` -- recovered by
+    reading the decompiled app (`com.zhapp.ble.a.a(int, String, String,
+    String, String, String)`, "Apricot" branch of
+    `ControlBleTools.sendAppNotification`) rather than from a live capture:
+    `{1: 179, 13: {2: {1: appName, 2: pageName, 3: title, 4: text,
+    5: tickerText}}}` (SENotification.appNotification = field 2, versus
+    systemNotification = field 1). The app itself caps title/ticker at 50
+    chars and text at 200 (truncating to max-1 chars and appending "..."),
+    which this replicates exactly -- see ControlBleTools.sendAppNotification
+    and BleUtils.truncateString in the decompiled smali.
+    """
+    app_notification = (
+        encode_field_bytes(1, _truncate_string(app_name, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
+        + encode_field_bytes(2, _truncate_string(page_name, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
+        + encode_field_bytes(3, _truncate_string(title, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
+        + encode_field_bytes(4, _truncate_string(text, APP_NOTIFICATION_TEXT_MAX).encode("utf-8"))
+        + encode_field_bytes(5, _truncate_string(ticker_text, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
+    )
+    notification = encode_field_bytes(2, app_notification)
+    return encode_field_varint(1, CMD_SEND_APP_NOTIFICATION) + encode_field_bytes(13, notification)
+
+
+def _truncate_string(value: str, max_length: int) -> str:
+    """Byte-for-byte port of the app's BleUtils.truncateString."""
+    if value is not None and len(value) > max_length:
+        return value[: min(max_length - 1, len(value))] + "..."
+    return value
 
 
 def header_frame(chunk_count: int) -> bytes:

@@ -133,12 +133,13 @@ Single-byte command ids observed live, sent as the protobuf payload
 | 164 | `0xa4 0x01` | `REAL_TIME_DATA_SWITCH` — see "Real-time push" below |
 | 165 | `0xa5 0x01` | `REPORT_BASIC_DATA` — watch-initiated push, never sent by us |
 | 178 | `0xb2 0x01` | `SEND_SYSTEM_NOTIFICATION` — see "Push notification" below |
+| 179 | `0xb3 0x01` | `SEND_APP_NOTIFICATION` — see "App push notification" below |
 | 480 | `0x1e0` | seen as `getClassicBluetoothState()`; multi-byte varint (`e0 03`) since >127 |
 
 `GET_DEVICE_INFO` (32), the fitness-data commands (112/113/115), the
 real-time push (164/165, including the `heartrate` CLI convenience command
-that just filters that stream for `heart_rate`), the notification push
-(178), and the workout-data commands (117/119/121) are implemented in
+that just filters that stream for `heart_rate`), the notification pushes
+(178/179), and the workout-data commands (117/119/121) are implemented in
 `zeblaze_ble` — see `protocol.py` and `gatttool_transport.py`. The others
 are documented here for whoever extends this next; their request encoding
 follows the same `08 <varint id>` pattern (varint-encode the id if ≥128),
@@ -575,6 +576,15 @@ hypotheses live in `TODO.md`'s "notify" entry (and `JOURNAL.md` for the
 narrative); local-Bluetooth-stack diagnostics attempted along the way are
 in `bluetooth-problems.md`.
 
+## App push notification: `SEND_APP_NOTIFICATION` (179)
+
+Structure: `{1: 179, 13: {2: {1: appName, 2: pageName, 3: title, 4: text,
+5: tickerText}}}` — the same `SEWear` envelope and field 13 as 178, but
+holding `SENotification{2: SEAppNotification{...}}` (appNotification is
+field 2 of `SENotification`; systemNotification is field 1). The app truncates title/ticker at 50 chars and text at 200
+(`BleUtils.truncateString`: `s[:max-1] + "..."`), which
+`protocol.encode_app_notification_request` replicates byte-for-byte.
+
 ## No encryption, no pairing
 
 There is no **zero SMP packets** and zero LE-encryption events for
@@ -611,12 +621,9 @@ AES-CCM anywhere.
 - Whether any command exists that performs a destructive write (e.g.
   factory reset, firmware update) — not investigated, and out of scope for
   this read-mostly tool regardless.
-- `ControlBleTools.sendAppNotification(...)` — a sibling of
-  `sendSystemNotification` found during the same decompilation, for
-  forwarding third-party app notifications (e.g. WhatsApp/Slack) rather
-  than calls/SMS. Not traced or implemented; presumably a different field
-  of `SENotification` (`SEAppNotification`, seen referenced in the smali
-  class list) with extra fields for the source app's identity/icon.
+- ~~`ControlBleTools.sendAppNotification(...)`~~ — traced and implemented
+  2026-08-30 as `SEND_APP_NOTIFICATION` (179), see "App push notification"
+  above.
 - The "Berry" protocol branch (`ControlBleTools.isBerryProtocol(...)`,
   `com.zhapp.ble.a$a`, classes like `WearSocketMessageData`) — a sibling
   code path in the same SDK for other watch models. Not relevant to this
