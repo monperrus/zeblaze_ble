@@ -918,6 +918,33 @@ the `true` one once pairing had succeeded. It stays true for the rest of
 the session, and the 179 that displayed went out at 07:39:21, 71 minutes
 inside that window.
 
+### What the HCI snoop shows at the moment the notification displayed
+
+`scratch/notif-capture/btsnoop2.log` covers 06:27:49–07:39:59 and contains
+two ACL handles to the watch: **`0x0008`, classic BR/EDR** (`Connect
+Complete`, `BD_ADDR d6:45:15:30:04:71`, `Link Type: ACL`, t=19.766) and
+**`0x0004`, LE**. There is **no `Disconnect Complete` anywhere in the
+capture**, so the classic link stayed up throughout.
+
+The 179 that displayed is frame 4100 at 07:39:21.890 (t=4292.76): an ATT
+`Write Command` to handle `0x0024` on **`0x0004` — the LE link**. Meanwhile
+the last classic traffic of any kind (an RFCOMM/HFP frame) is at t=3075.0.
+
+```
+t=  19.766  classic ACL 0x0008 up ....................... never torn down
+t=3075.000  last classic packet (RFCOMM/HFP)
+t=4292.758  the 179 that displayed  -> LE handle 0x0004
+            ................. 1218 s of classic silence .................
+```
+
+So at the moment of display the classic link was **present but completely
+idle for ~20 minutes**, and the notification's bytes crossed BLE alone.
+Display therefore does not require the notification to travel over the
+classic link, nor any classic activity at the time — only that the link
+*exist*. That also narrows what a Linux host would have to reproduce: a
+bare classic ACL connection, not the HFP profile that `TODO.md` item 4
+found `bluetoothd` refusing.
+
 That makes 25 a direct read-out of the variable the standing
 notification-display hypothesis is about (see `TODO.md`): every 179 that
 acked without displaying was sent while this query returns
