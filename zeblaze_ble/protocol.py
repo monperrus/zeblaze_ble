@@ -135,6 +135,14 @@ def encode_field_varint(field_number: int, value: int) -> bytes:
     return encode_varint((field_number << 3) | 0) + encode_varint(value)
 
 
+def encode_field_int32(field_number: int, value: int) -> bytes:
+    """Encode a protobuf ``int32`` field, including negative UTC offsets."""
+    if not -(1 << 31) <= value < (1 << 31):
+        raise ValueError("int32 value out of range")
+    encoded_value = value if value >= 0 else (1 << 64) + value
+    return encode_varint((field_number << 3) | 0) + encode_varint(encoded_value)
+
+
 def encode_field_bytes(field_number: int, data: bytes) -> bytes:
     return encode_varint((field_number << 3) | 2) + encode_varint(len(data)) + data
 
@@ -209,6 +217,22 @@ def encode_binding_result_request(user_id: str, phone_type: int = PHONE_TYPE_AND
     )
     bind_account = encode_field_bytes(3, bind_result)
     return encode_field_varint(1, CMD_BINDING_RESULT) + encode_field_bytes(3, bind_account)
+
+
+def encode_set_system_time_request(timestamp: int, utc_offset_quarters: int) -> bytes:
+    """Build command 48 using Unix seconds and UTC offset in 15-minute units.
+
+    This matches ``ControlBleTools.setSystemTime(long)``: its optional
+    ``time_format`` field is omitted, so synchronizing the clock does not
+    alter the watch's 12/24-hour preference.
+    """
+    if not 0 <= timestamp < (1 << 31):
+        raise ValueError("timestamp must fit a positive protobuf int32")
+    if not -48 <= utc_offset_quarters <= 56:
+        raise ValueError("UTC offset must be between -12:00 and +14:00")
+    time_set = encode_field_varint(1, timestamp) + encode_field_int32(2, utc_offset_quarters)
+    system_time = encode_field_bytes(1, time_set)
+    return encode_field_varint(1, CMD_SET_SYSTEM_TIME) + encode_field_bytes(5, system_time)
 
 
 def parse_mtu_response(payload: bytes) -> int:

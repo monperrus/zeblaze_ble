@@ -8,6 +8,8 @@ vendor app itself displayed for the same bytes.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from zeblaze_ble import protocol
@@ -122,6 +124,17 @@ def test_gatttool_session_rejects_invalid_att_mtu() -> None:
         GatttoolSession("D6:45:15:30:04:71", att_mtu=22)
 
 
+def test_gatttool_session_preserves_notifications_for_other_handles() -> None:
+    async def exercise() -> None:
+        session = GatttoolSession("D6:45:15:30:04:71")
+        await session._notifications.put((0x0021, b"watch-message"))
+        await session._notifications.put((0x0024, b"command-ack"))
+        assert await session._next_notification(0x0024) == b"command-ack"
+        assert await session._next_notification(0x0021) == b"watch-message"
+
+    asyncio.run(exercise())
+
+
 def test_encode_unbind_request_matches_the_live_capture() -> None:
     # Official-app unbind at 2026-08-31 20:53:17.305; response was
     # 08 17 a0 06 00 ({command: 23, status: 0}).
@@ -151,6 +164,22 @@ def test_parse_minimal_binding_responses() -> None:
     assert protocol.parse_generic_response_status(bytes.fromhex("0812a00600"), 18) == 0
     assert protocol.parse_binding_status_response(bytes.fromhex("08101a020801")) is True
     assert protocol.parse_binding_status_response(bytes.fromhex("08101a020800")) is False
+
+
+def test_encode_set_system_time_matches_the_official_app_shape() -> None:
+    # {1:48, 5:{1:{1:1700000000, 2:8}}}; time_format is intentionally absent.
+    assert protocol.encode_set_system_time_request(1_700_000_000, 8) == bytes.fromhex(
+        "08302a0a0a080880e2cfaa061008"
+    )
+
+
+def test_encode_set_system_time_supports_negative_utc_offsets() -> None:
+    encoded = protocol.encode_set_system_time_request(1_700_000_000, -20)
+    fields = protocol.decode_protobuf(encoded)
+    system_time = protocol.decode_protobuf(fields[5][0].raw)  # type: ignore[arg-type]
+    time_set = protocol.decode_protobuf(system_time[1][0].raw)  # type: ignore[arg-type]
+    # Protobuf int32 negatives are sign-extended to a ten-byte varint.
+    assert time_set[2][0].raw == (1 << 64) - 20
 
 
 def test_bind_cli_requires_explicit_user_id_and_write_opt_in() -> None:

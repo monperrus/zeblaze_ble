@@ -11,7 +11,9 @@ instead of bleak, using the fixed handles observed for this watch's firmware.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import re
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from . import protocol
@@ -50,6 +52,10 @@ class BindOutcome:
     binding_result_response: bytes
     binding_status_response: bytes
     bound: bool
+    timestamp: int
+    utc_offset_quarters: int
+    time_response: bytes
+    watch_messages: tuple[bytes, ...]
 
 
 async def _disconnect_local_bluez(address: str) -> None:
@@ -98,6 +104,7 @@ class GatttoolSession:
         self._att_mtu = att_mtu
         self._process: asyncio.subprocess.Process | None = None
         self._notifications: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
+        self._pending_notifications: dict[int, deque[bytes]] = defaultdict(deque)
         self._lines: asyncio.Queue[str] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
 
@@ -261,18 +268,27 @@ class GatttoolSession:
         await self._send_line(f"char-write-cmd 0x{value_handle:04x} {payload.hex()}")
 
     async def _next_notification(self, expect_handle: int, timeout: float = _PROMPT_TIMEOUT_SECONDS) -> bytes:
+        pending = self._pending_notifications[expect_handle]
+        if pending:
+            return pending.popleft()
         while True:
             handle, value = await asyncio.wait_for(self._notifications.get(), timeout=timeout)
             if handle == expect_handle:
                 return value
+            self._pending_notifications[handle].append(value)
 
     async def _next_notification_any(
         self, expect_handles: frozenset[int], timeout: float = _PROMPT_TIMEOUT_SECONDS
     ) -> tuple[int, bytes]:
+        for handle in expect_handles:
+            pending = self._pending_notifications[handle]
+            if pending:
+                return handle, pending.popleft()
         while True:
             handle, value = await asyncio.wait_for(self._notifications.get(), timeout=timeout)
             if handle in expect_handles:
                 return handle, value
+            self._pending_notifications[handle].append(value)
 
     async def send_message(self, payload: bytes, mtu_chunk_size: int = 180) -> None:
         chunks = [payload[i : i + mtu_chunk_size] for i in range(0, len(payload), mtu_chunk_size)] or [b""]
@@ -299,6 +315,21 @@ class GatttoolSession:
             chunks[index] = chunk
         await self._write(value_handle, protocol.ACK_COMPLETE)
         return b"".join(chunks[index] for index in sorted(chunks))
+
+    async def receive_pending_messages(
+        self,
+        value_handle: int = _READ_VALUE_HANDLE,
+        grace_seconds: float = 1.0,
+    ) -> list[bytes]:
+        """Acknowledge complete watch-originated messages until the channel is idle."""
+        messages: list[bytes] = []
+        while True:
+            try:
+                messages.append(
+                    await self.receive_message(value_handle, header_timeout=grace_seconds)
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                return messages
 
     async def receive_all_activity_data(
         self, grace_seconds: float = 3.0, first_round_timeout: float = _PROMPT_TIMEOUT_SECONDS
@@ -513,11 +544,25 @@ async def bind_watch(
         if result_status != 0:
             raise RuntimeError(f"binding result failed with status {result_status}")
 
+        watch_messages = await session.receive_pending_messages(grace_seconds=1.0)
+
         await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
         binding_status_response = await session.receive_message()
         bound = protocol.parse_binding_status_response(binding_status_response)
         if not bound:
             raise RuntimeError("watch accepted command 18 but still reports unbound")
+
+        watch_messages.extend(await session.receive_pending_messages(grace_seconds=1.0))
+        timestamp, utc_offset_quarters = _local_time_parameters()
+        await session.send_message(
+            protocol.encode_set_system_time_request(timestamp, utc_offset_quarters)
+        )
+        time_response = await session.receive_message()
+        time_status = protocol.parse_generic_response_status(
+            time_response, protocol.CMD_SET_SYSTEM_TIME
+        )
+        if time_status != 0:
+            raise RuntimeError(f"setting system time failed with status {time_status}")
 
     return BindOutcome(
         mtu=mtu,
@@ -525,7 +570,39 @@ async def bind_watch(
         binding_result_response=binding_result_response,
         binding_status_response=binding_status_response,
         bound=bound,
+        timestamp=timestamp,
+        utc_offset_quarters=utc_offset_quarters,
+        time_response=time_response,
+        watch_messages=tuple(watch_messages),
     )
+
+
+def _local_time_parameters(now: dt.datetime | None = None) -> tuple[int, int]:
+    """Return Unix seconds and the current local UTC offset in quarter-hours."""
+    local_now = (now or dt.datetime.now().astimezone()).astimezone()
+    offset = local_now.utcoffset() or dt.timedelta()
+    return int(local_now.timestamp()), int(offset.total_seconds() / 900)
+
+
+async def set_watch_time(address: str) -> tuple[int, int, bytes, tuple[bytes, ...]]:
+    """Negotiate MTU 247 and synchronize the watch with this host's clock."""
+    timestamp, utc_offset_quarters = _local_time_parameters()
+    async with GatttoolSession(address, att_mtu=247) as session:
+        watch_messages = await session.receive_pending_messages(grace_seconds=2.0)
+        await session.send_message(protocol.encode_mtu_request_change())
+        mtu_response = await session.receive_message()
+        mtu = protocol.parse_mtu_response(mtu_response)
+        if mtu != 247:
+            raise RuntimeError(f"watch confirmed ATT MTU {mtu}, expected 247")
+
+        await session.send_message(
+            protocol.encode_set_system_time_request(timestamp, utc_offset_quarters)
+        )
+        response = await session.receive_message()
+        status = protocol.parse_generic_response_status(response, protocol.CMD_SET_SYSTEM_TIME)
+        if status != 0:
+            raise RuntimeError(f"setting system time failed with status {status}")
+    return timestamp, utc_offset_quarters, response, tuple(watch_messages)
 
 
 async def send_notification(

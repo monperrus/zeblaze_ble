@@ -163,12 +163,16 @@ The minimal binding sequence uses one uninterrupted BLE session:
 1. Negotiate ATT MTU 247 and send command 0.
 2. Send command 17 and receive the watch identity.
 3. Send command 18 with bind result `SUCCESS`, user ID, and phone type.
-4. Query command 16; binding is complete when it reports true.
+4. Receive and acknowledge any watch-originated messages, notably command 27.
+5. Query command 16; binding is complete when it reports true.
+6. Send command 48 to synchronize the clock and UTC offset.
 
 Commands 48, 65, 49, and 164 are post-bind device initialization, not
-binding prerequisites. Command 27 and command 19 are also not required to
-commit the binding. Command 19 may be used for the stronger check that the
-stored user identifier matches.
+binding prerequisites. The CLI sends command 48 after a successful bind to
+synchronize the clock. Command 27 and command 19 are not required to commit
+the binding. However, command 27 must be received and transport-acknowledged
+when emitted; leaving it pending blocks later protocol exchanges. Command 19
+may be used for the stronger check that the stored user identifier matches.
 
 ### Binding status: command 16
 
@@ -225,10 +229,24 @@ The immediate response is generic success. Binding is complete when command
 
 ### Initialization commands
 
-Command 48 sets the system time. Its payload contains the Unix timestamp and
-timezone setting inside envelope field 5. Command 49 uses the same clock data
-and adds the 12/24-hour selection. Command 65 requests the supported language
-list. Command 164 enables real-time reports:
+Command 48 sets the system time:
+
+```text
+{
+  1:48,
+  5:{
+    1:{
+      1:unix_timestamp_seconds,
+      2:utc_offset_in_15_minute_units
+    }
+  }
+}
+```
+
+The standard clock-sync call omits the optional time-format field and thus
+does not alter the 12/24-hour preference. `protocol.encode_set_system_time_request()`
+implements this shape. Command 49 sets the 12/24-hour selection. Command 65
+requests the supported language list. Command 164 enables real-time reports:
 
 ```text
 08 a4 01 62 02 18 00
@@ -245,7 +263,10 @@ Command 27 is watch-originated and carries classic-radio state:
 ```
 
 Do not synthesize command 27 from the host. Receive and acknowledge it using
-the normal chunked transport when it is emitted.
+the normal chunked transport when it is emitted. The watch waits for that
+acknowledgement before serving later application messages, so clients must
+not discard notifications received on another characteristic while awaiting
+a command ACK.
 
 ### User verification: command 19
 
@@ -401,10 +422,23 @@ Types:
 | 2 | Message |
 
 `protocol.encode_system_notification_request()` implements this shape.
-With a valid application binding and ATT MTU 247, type 2 displays
-`contacts_info` and `message_text` as a transient system notification and
-returns generic success. It disappears automatically rather than remaining
-in the watch UI. The on-watch behavior of types 0 and 1 is not yet verified.
+With a valid application binding and ATT MTU 247, all three types display on
+the watch and return generic success:
+
+- Type 0 displays the incoming-call UI using `phone_number` and
+  `contacts_info`. The official encoder sends an empty `message_text`.
+- Type 1 displays a missed-call alert.
+- Type 2 displays `contacts_info` and `message_text` as a transient message
+  that disappears automatically.
+
+Multiple command-178 messages may be sent consecutively in one BLE session.
+As with every command, watch-originated messages must be transport-acknowledged;
+an unacknowledged command 27 can otherwise block the channel and make later
+command headers appear to be refused.
+
+Command 178 supplies notification UI and metadata over BLE. Classic Bluetooth
+HFP is a separate path expected to carry real call control and audio; the
+watch-button signaling for accepting or rejecting calls is not yet decoded.
 
 ## Event reminders
 
