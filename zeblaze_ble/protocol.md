@@ -1,690 +1,344 @@
-# The smartwatch protocol of Zeblaze
+# Zeblaze Beyond 3 Pro protocol
 
-This is the documentation the wire protocol to talk to Zebaze Watches
-the Zeblaze Beyond 3 Pro.
+This document describes the Apricot protocol used by the Zeblaze Beyond 3
+Pro. It is a wire-format reference for implementations.
 
-The app's own SDK version string for this is `ZH_SDK_20260730_V2.3.9`, hence
-"ZH_SDK" as the name here. The protocol version is called "Apricot".
+## GATT service
 
-## GATT layout
+Service UUID: `16186f00-0000-1000-8000-00807f9b34fb`.
 
-Service `16186f00-0000-1000-8000-00807f9b34fb`, with 5 characteristics
-(`6f01`-`6f05`), each `WRITE_NO_RESPONSE | NOTIFY` (properties `0x14`):
+All five characteristics support `WRITE_NO_RESPONSE | NOTIFY`:
 
-| UUID suffix | Name in `protocol.py` | Role |
-|---|---|---|
-| `6f01` | `COMMAND_READ` | app→watch commands' *responses* arrive here (watch writes, app reads via notify) |
-| `6f02` | `COMMAND_WRITE` | app→watch commands are *sent* here (app writes, watch acks via notify) |
-| `6f03` | `ACTIVITY_DATA` | observed in the GATT table; role not yet characterized |
-| `6f04` | `DATA_UPLOAD` | observed in the GATT table; role not yet characterized |
-| `6f05` | (unnamed) | observed in the GATT table; role not yet characterized |
+| UUID | Name | Value handle | CCCD | Role |
+| --- | --- | ---: | ---: | --- |
+| `16186f01-0000-1000-8000-00807f9b34fb` | `COMMAND_READ` | `0x0021` | `0x0022` | Command responses and watch-originated messages |
+| `16186f02-0000-1000-8000-00807f9b34fb` | `COMMAND_WRITE` | `0x0024` | `0x0025` | Host commands and transport acknowledgements |
+| `16186f03-0000-1000-8000-00807f9b34fb` | `ACTIVITY_DATA` | `0x0027` | `0x0028` | Bulk workout data |
+| `16186f04-0000-1000-8000-00807f9b34fb` | `DATA_UPLOAD` | `0x002a` | `0x002b` | Reserved/unknown |
+| `16186f05-0000-1000-8000-00807f9b34fb` | `CHANNEL_6F05` | `0x002d` | `0x002e` | Reserved/unknown |
 
-On this watch's firmware (`1.1.2`), the fixed ATT handles are: `6f01` value
-handle `0x0021` / CCCD `0x0022`; `6f02` value handle `0x0024` / CCCD `0x0025`.
+Enable notifications on all five CCCDs when opening a protocol session.
+These handles apply to firmware `1.1.2`.
 
-Both `6f01` and `6f02` are used bidirectionally for the ack handshake below —
-"read" and "write" in the names above describe the *command* direction, not
-a hardware read/write-only restriction.
+## Session initialization and MTU
 
-## Chunked transport
+Application binding requires ATT MTU 247 and a matching SDK-level MTU
+exchange:
 
-Every message (command or response) — up to and including the tiny 2-byte
-ones — goes through the same four-frame handshake, regardless of which side
-initiates it or which characteristic carries it:
+1. Connect over LE.
+2. Complete ATT Exchange MTU with MTU 247.
+3. Enable all five notification CCCDs.
+4. Send command 0:
 
-```
-originator            recipient
-    |--- header frame ---->|      announces N data chunks incoming
-    |<---- ready ack -------|
-    |--- data chunk 1 ----->|
-    |--- data chunk 2 ----->|      (N of these)
-    |         ...           |
-    |<--- complete ack ------|
+```text
+-> 08 00 9a 06 09 08 f7 01 10 0c 18 0c 20 00
+<- 08 00 10 f7 01
 ```
 
-All four frame types are plain byte strings written with **Write Command**
-(no response) and delivered to the peer via **Notification** — there is no
-ATT-level request/response here, the ack/ready semantics are entirely an
-application-layer convention on top of write-without-response + notify.
+Command 0 has this protobuf shape:
 
-### Header frame (6 bytes)
-
-`00 00 00 00 <N low> <N high>` — `N` is the chunk count, little-endian
-16-bit. In every capture so far `N` has been 1 or 2.
-
-- `protocol.header_frame(chunk_count)` builds it.
-- `protocol.is_header_frame(frame)` / `chunk_count_from_header(frame)` parse it.
-
-### Ready ack (6 bytes, fixed)
-
-`00 00 01 01 00 00` — sent by the recipient immediately after a header
-frame, before any data chunks are sent.
-
-- `protocol.ACK_READY`, `protocol.is_ready_ack(frame)`.
-
-### Data chunk (2-byte header + payload)
-
-`<index> 00 <payload bytes>` — `index` is 1-based (`0x01`, `0x02`, ...),
-one chunk per header-announced count. Chunk size in the captures was well
-under 180 bytes (single-chunk for every message observed), so the exact MTU
-segmentation boundary for larger multi-chunk payloads isn't confirmed;
-`gatttool_transport.py`/`transport.py` use 180 bytes as a conservative
-default.
-
-- `protocol.data_chunk(index, payload)` builds it.
-- `protocol.split_data_chunk(frame)` parses it → `(index, payload)`.
-
-### Complete ack (6 bytes, fixed)
-
-`00 00 01 00 00 00` — sent by the recipient once it has all `N` chunks.
-
-- `protocol.ACK_COMPLETE`, `protocol.is_complete_ack(frame)`.
-
-### Reassembly
-
-Concatenate the chunk payloads in index order (`b"".join(chunks[i] for i in
-sorted(chunks))`) to get the actual message bytes, which are themselves a
-small protobuf message (see below).
-
-### Example: a full request/response round trip
-
-Requesting `GET_DEVICE_INFO` (command id 32, `08 20` as protobuf bytes) and
-receiving the reply, both on their respective channels:
-
-```
-app  -> 6f02: 00 00 00 00 01 00        (header: 1 chunk coming)
-app <-  6f02: 00 00 01 01 00 00        (ready ack)
-app  -> 6f02: 01 00 08 20              (chunk 1: command id 32)
-app <-  6f02: 00 00 01 00 00 00        (complete ack)
-
-app <-  6f01: 00 00 00 00 01 00        (watch announces 1 chunk response)
-app  -> 6f01: 00 00 01 01 00 00        (ready ack)
-app <-  6f01: 01 00 08 20 22 34 0a 32 0a 05 31 2e 31 2e 32 12 05
-              33 30 31 30 38 1a 11 44 36 3a 34 35 3a 31 35 3a 33
-              30 3a 30 34 3a 37 31 22 05 31 30 30 30 35 2a 04 08
-              43 10 02 30 00 38 01
-app  -> 6f01: 00 00 01 00 00 00        (complete ack)
-```
-
-The reassembled response payload (single chunk here, so no concatenation
-needed) is `08 20 22 34 0a 32 ... 38 01` — see "Message schema" below for
-the decode.
-
-## Command ids
-
-Single-byte command ids observed live, sent as the protobuf payload
-`{1: command_id}` (i.e. bytes `08 <id>`):
-
-| id (dec) | id (hex) | Name |
-|---|---|---|
-| 16 | `0x10` | `INQUIRY_BINDING_STATUS` |
-| 17 | `0x11` | `BINDING_CHECK` — see "Binding" below |
-| 18 | `0x12` | `BINDING_RESULT` — see "Binding" below |
-| 19 | `0x13` | `VERIFY_USER_NUMBER` (carries the server-side numeric user id as a string, not a secret) |
-| 23 | `0x17` | `UNBIND_REQUEST` — destructive; see "Unbinding" below |
-| 25 | `0x19` | `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` — see "Classic-Bluetooth status" below |
-| 27 | `0x1b` | `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` — watch-initiated, same payload |
-| 32 | `0x20` | `GET_DEVICE_INFO` — bundles firmware/MAC/serial **and battery status** |
-| 33 | `0x21` | `GET_DEVICE_BATTERY` |
-| 48 | `0x30` | `SET_SYSTEM_TIME` |
-| 65 | `0x41` | `GET_LANGUAGE_DETAILED` |
-| 69 | `0x45` | `SET_USER_INFORMATION` |
-| 112 | `0x70` | `GET_FITNESS_TYPE_ID_LIST` — see "Fitness data" below (sleep included) |
-| 113 | `0x71` | `REQUEST_FITNESS_TYPE_ID` |
-| 115 | `0x73` | `CONFIRM_FITNESS_TYPE_ID` |
-| 117 | `0x75` | `GET_FITNESS_SPORT_ID_LIST` — see "Workout data" below |
-| 119 | `0x77` | `REQUEST_FITNESS_SPORT_DATA` — see "Workout data" below |
-| 121 | `0x79` | `CONFIRM_FITNESS_SPORT_ID_LIST` — see "Workout data" below |
-| 164 | `0xa4 0x01` | `REAL_TIME_DATA_SWITCH` — see "Real-time push" below |
-| 165 | `0xa5 0x01` | `REPORT_BASIC_DATA` — watch-initiated push, never sent by us |
-| 178 | `0xb2 0x01` | `SEND_SYSTEM_NOTIFICATION` — see "Push notification" below |
-| 179 | `0xb3 0x01` | `SEND_APP_NOTIFICATION` — see "App push notification" below |
-| 211 | `0xd3 0x01` | `GET_EVENT_INFO_LIST` — see "Event reminders" below |
-| 212 | `0xd4 0x01` | `SET_EVENT_INFO_LIST` — see "Event reminders" below |
-| 214 | `0xd6 0x01` | seen as a watch-initiated push, response `7a 0b 1a 09 {1:1, 2:5, 3:0, 4:130}`; not decoded |
-| 247 | `0xf7 0x01` | `GET_SCREEN_SETTING` — response `{15: {14: {1: brightness_level, 2: normally_on_switch, 3: on_screen_duration, 4: double_click_the_highlighted_screen}}}` |
-| 249 | `0xf9 0x01` | `REQUEST_SCREEN_SETTING` — watch-initiated, asks the app to re-read the screen settings |
-| 495 | `0x1ef` | `GET_NOTIFICATION_SETTINGS` — observed returning `errorCode = 1` (unsupported on this model) |
-| 480 | `0x1e0` | seen as `getClassicBluetoothState()`; multi-byte varint (`e0 03`) since >127 |
-
-`GET_DEVICE_INFO` (32), the fitness-data commands (112/113/115), the
-real-time push (164/165, including the `heartrate` CLI convenience command
-that just filters that stream for `heart_rate`), the notification pushes
-(178/179), and the workout-data commands (117/119/121) are implemented in
-`zeblaze_ble` — see `protocol.py` and `gatttool_transport.py`. The others
-are documented here for whoever extends this next; their request encoding
-follows the same `08 <varint id>` pattern (varint-encode the id if ≥128),
-but their response schemas haven't been decoded.
-
-There is no known command that performs a destructive action (factory
-reset, firmware update).
-
-## Message schema (protobuf, no compiled `.proto` available)
-
-Messages are small ad-hoc protobuf (varint + length-delimited fields only,
-confirmed sufficient for everything seen so far — see
-`protocol.decode_protobuf`, a minimal hand-rolled decoder).
-
-### `GET_DEVICE_INFO` response (command id 32)
-
-Two levels of wrapper before the real fields — easy to miss (see
-`protocol.parse_device_info`'s docstring, this tripped up the first
-implementation attempt):
-
-```
+```text
 {
-  1: command_id (32, varint — echoes the request)
-  4: {                              <- one extra wrapper level
-    1: {                            <- the actual device-info message
-      1: firmware_version (string, e.g. "1.1.2")
-      2: equipment_number (string, e.g. "30108")
-      3: mac (string, e.g. "D6:45:15:30:04:71")
-      4: serial_number (string, e.g. "10005")
-      5: device_battery_status {
-        1: capacity (varint, percent)
-        2: charge_status (varint, 2 = NOT_CHARGING observed; other values unconfirmed)
-      }
-      6: remote_device_remote_camera_switch (varint bool, 0 observed)
-      7: sports_icon_function_protocol_switch (varint bool, 1 observed)
+  1: 0,
+  99: {
+    1: 247,  # negotiated ATT MTU
+    2: 12,   # minimum chunk setting
+    3: 12,   # maximum chunk setting
+    4: 0     # mode
+  }
+}
+```
+
+The response field 2 contains the active ATT MTU. Implemented by
+`protocol.encode_mtu_request_change()` and
+`GatttoolSession(..., att_mtu=247)`.
+
+## Chunked message transport
+
+Every protobuf message uses the same application-layer handshake:
+
+```text
+originator                         recipient
+    |--- 00 00 00 00 NN NN ---------->|  header: chunk count, uint16 LE
+    |<-- 00 00 01 01 00 00 -----------|  ready acknowledgement
+    |--- II 00 <payload> -------------->|  one frame per chunk
+    |                 ...               |
+    |<-- 00 00 01 00 00 00 -----------|  complete acknowledgement
+```
+
+- Chunk indexes are one-based.
+- Reassemble payloads in index order.
+- Frames use ATT Write Command and Notification. The ready and complete
+  frames are protocol acknowledgements, not ATT responses.
+- The Linux transport uses payload chunks of at most 180 bytes.
+- `protocol.header_frame`, `data_chunk`, `split_data_chunk`,
+  `is_ready_ack`, and `is_complete_ack` implement the framing.
+
+Host commands are written to `6f02`; their protobuf responses arrive on
+`6f01`. The same handshake is reversed for watch-originated messages.
+
+Example request for `GET_DEVICE_INFO`:
+
+```text
+host -> 6f02  00 00 00 00 01 00
+host <- 6f02  00 00 01 01 00 00
+host -> 6f02  01 00 08 20
+host <- 6f02  00 00 01 00 00 00
+
+host <- 6f01  00 00 00 00 01 00
+host -> 6f01  00 00 01 01 00 00
+host <- 6f01  01 00 08 20 ...
+host -> 6f01  00 00 01 00 00 00
+```
+
+## Protobuf envelope
+
+Messages use protobuf varints and length-delimited fields. Field 1 is the
+command identifier:
+
+```text
+{1: command_id, ...command-specific fields...}
+```
+
+Commands with no request data contain field 1 alone. Command 32, for example,
+is `08 20`. Identifiers above 127 use normal protobuf varint encoding.
+
+Generic success response:
+
+```text
+{1: command_id, 100: 0}
+```
+
+Command 179, for example, succeeds with `08 b3 01 a0 06 00`.
+
+## Command identifiers
+
+| Decimal | Varint bytes | Name |
+| ---: | --- | --- |
+| 0 | `00` | `MTU_REQUEST_CHANGE` |
+| 16 | `10` | `INQUIRY_BINDING_STATUS` |
+| 17 | `11` | `BINDING_CHECK` |
+| 18 | `12` | `BINDING_RESULT` |
+| 19 | `13` | `VERIFY_USER_NUMBER` |
+| 23 | `17` | `UNBIND_REQUEST` |
+| 25 | `19` | `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` |
+| 27 | `1b` | `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` |
+| 32 | `20` | `GET_DEVICE_INFO` |
+| 33 | `21` | `GET_DEVICE_BATTERY` |
+| 48 | `30` | `SET_SYSTEM_TIME` |
+| 49 | `31` | `SET_12_24_TIME_TYPE` |
+| 65 | `41` | `GET_LANGUAGE_DETAILED` |
+| 69 | `45` | `SET_USER_INFORMATION` |
+| 112 | `70` | `GET_FITNESS_TYPE_ID_LIST` |
+| 113 | `71` | `REQUEST_FITNESS_TYPE_ID` |
+| 115 | `73` | `CONFIRM_FITNESS_TYPE_ID` |
+| 117 | `75` | `GET_FITNESS_SPORT_ID_LIST` |
+| 119 | `77` | `REQUEST_FITNESS_SPORT_DATA` |
+| 121 | `79` | `CONFIRM_FITNESS_SPORT_ID_LIST` |
+| 164 | `a4 01` | `REAL_TIME_DATA_SWITCH` |
+| 165 | `a5 01` | `REPORT_BASIC_DATA` |
+| 178 | `b2 01` | `SEND_SYSTEM_NOTIFICATION` |
+| 179 | `b3 01` | `SEND_APP_NOTIFICATION` |
+| 211 | `d3 01` | `GET_EVENT_INFO_LIST` |
+| 212 | `d4 01` | `SET_EVENT_INFO_LIST` |
+| 247 | `f7 01` | `GET_SCREEN_SETTING` |
+| 249 | `f9 01` | `REQUEST_SCREEN_SETTING` |
+| 480 | `e0 03` | `GET_CLASSIC_BLUETOOTH_STATE` |
+| 495 | `ef 03` | `GET_NOTIFICATION_SETTINGS` |
+
+## Application binding
+
+Binding associates the watch with an application user identifier. The user
+identifier is an ASCII decimal string, not a cryptographic credential.
+
+### Binding sequence
+
+Use one uninterrupted BLE session:
+
+1. Negotiate ATT MTU 247 and send command 0.
+2. Query command 16. Continue only if it reports unbound.
+3. Send command 17 and receive the watch identity.
+4. Send command 18 with bind result `SUCCESS`, user ID, and phone type.
+5. Send initialization commands 48, 65, 49, and 164.
+6. Process watch-originated messages until command 27 arrives.
+7. Query command 16 and command 19 to confirm the binding.
+
+### Binding status: command 16
+
+```text
+-> 08 10
+<- 08 10 1a 02 08 00  # {1:16, 3:{1:false}} unbound
+<- 08 10 1a 02 08 01  # {1:16, 3:{1:true}}  bound
+```
+
+### Binding check: command 17
+
+Request:
+
+```text
+08 11 1a 04 12 02 08 01
+```
+
+Shape:
+
+```text
+{1:17, 3:{2:{2:{1:true}}}}
+```
+
+The response contains the bind-check result, device verification state,
+equipment number, BLE MAC address, serial number, firmware version, and
+device name. `protocol.encode_binding_check_request()` builds the request.
+
+### Binding result: command 18
+
+Example for Android user `2011999`:
+
+```text
+08 12 1a 0f 1a 0d 08 00 12 07 32 30 31 31 39 39 39 18 00
+```
+
+Shape:
+
+```text
+{
+  1:18,
+  3:{
+    3:{
+      1:0,          # SUCCESS
+      2:"2011999", # user ID
+      3:0           # ANDROID; IOS is 1
     }
   }
 }
 ```
 
-Decoding the example payload above (`08 20 22 34 0a 32 0a 05 31 2e 31 2e 32
-12 05 33 30 31 30 38 1a 11 44 36 3a 34 35 3a 31 35 3a 33 30 3a 30 34 3a 37 31
-22 05 31 30 30 30 35 2a 04 08 43 10 02 30 00 38 01`):
+The immediate response is generic success. Binding is complete only after
+command 16 reports true and command 19 verifies the user.
+`protocol.encode_binding_result_request(user_id)` builds the request.
 
-- `08 20` → field 1, varint 32
-- `22 34` → field 4, length 0x34=52 bytes → wrapper
-  - `0a 32` → field 1, length 0x32=50 bytes → the real device-info message
-    - `0a 05 "1.1.2"` → field 1 (firmware_version)
-    - `12 05 "30108"` → field 2 (equipment_number)
-    - `1a 11 "D6:45:15:30:04:71"` → field 3 (mac)
-    - `22 05 "10005"` → field 4 (serial_number)
-    - `2a 04 08 43 10 02` → field 5 (battery): `{1: 0x43=67, 2: 0x02}`
-    - `30 00` → field 6, varint 0
-    - `38 01` → field 7, varint 1
+### Initialization commands
 
-Example exchange:
-`GET_DEVICE_INFO_VALUE device = firmware_version: "1.1.2" ... capacity: 67
-charge_status: NOT_CHARGING ...`.
+Command 48 sets the system time. Its payload contains the Unix timestamp and
+timezone setting inside envelope field 5. Command 49 uses the same clock data
+and adds the 12/24-hour selection. Command 65 requests the supported language
+list. Command 164 enables real-time reports:
 
-### Other command payloads seen but not decoded
-
-- `VERIFY_USER_NUMBER` (19) request: `08 13 1a 09 32 07 "2011999"` — field 3
-  wraps field 6 (a string) holding the numeric user id as ASCII decimal.
-  This is the "application authorization exchange" the top-level README's
-  binding-capture note refers to; it identifies the account, not a device
-  secret.
-- `INQUIRY_BINDING_STATUS` (16) response: `08 10 1a 02 08 01` → field 3 = `{1:
-  1}`, i.e. `request_binding_status: true`.
-
-## Fitness data (steps, distance, calories, sleep, heart rate, activity, standing)
-
-### The `time` submessage
-
-Used everywhere a date/timestamp is needed in this part of the protocol:
-`{1: year, 2: month, 3: day, 4: hour, 5: minute, 6: second}`, all varints.
-`protocol.encode_time(...)`.
-
-### `GET_FITNESS_TYPE_ID_LIST` (112) — the menu
-
-Request: just `08 70` (no payload beyond the command id).
-
-Response shape: `{1: 112, 9: {2: {1: [{1: time, 2: function_type}, ...
-repeated]}}}` — two wrapper levels before a repeated list of `(date,
-function_type)` pairs, each one a currently-fetchable data bucket.
-`protocol.parse_fitness_type_id_list`.
-
-`function_type` values observed live: `0` = daily (steps/distance/calories),
-`1` = sleep, `2` = continuous heart rate, `11` = effective standing,
-`12` = activity duration (see `protocol.FITNESS_TYPE_*`). These match the
-app's own `FitnessProtos$SEFitnessTypeId$SEFitnessFunctionType` enum, which
-declares 25 values in total; the rest (blood oxygen, pressure, temperature,
-ECG, nap, drink water, and the "GoMore" algorithm outputs) have never been
-offered by this model, whose `DEVICE_SETTING`
-capability flags (`android-observations.md`) disable them. A sleep bucket
-appears only for a date the watch actually recorded a night on, so the
-number of entries varies with what the watch has to offer.
-
-### `REQUEST_FITNESS_TYPE_ID` (113) — fetch one bucket
-
-Request shape: `{1: 113, 9: {1: {1: time, 2: function_type}}}` — note this
-has **one more wrapper level** than the list entries above (`9.1.{1,2}`
-here vs. `9.2.1[].{1,2}` there — different nesting depth for the single-item
-request than for the repeated-list response, verified by encoding and
-byte-comparing against 8 live examples, see `protocol.encode_fitness_type_id_request`).
-
-Response shape: `{1: 113, 9: {N: <bean>}}` where `N` depends on
-`function_type` (a lookup table, not a formula —
-`protocol._FITNESS_RESPONSE_FIELD`):
-
-| function_type | response field N | bean |
-|---|---|---|
-| 0 (daily) | 4 | `DailyData` |
-| 1 (sleep) | 5 | `SleepData` |
-| 2 (continuous heart rate) | 6 | `ContinuousHeartRate` |
-| 11 (effective standing) | 14 | `EffectiveStanding` |
-| 12 (activity duration) | 15 | `ActivityDuration` |
-
-Both the function-type values and these field numbers are also the app's own
-protobuf constants (`FitnessProtos$SEFitness`'s `*_FIELD_NUMBER`), which is
-how the 11/12 pair was settled: the wire evidence pairs type 11 with field 14
-and type 12 with field 15, and the app names field 14 effective standing and
-field 15 activity duration.
-
-Bean field layouts (all verified against real payloads, see
-`protocol.parse_daily_data` etc.):
-
-- **`DailyData`**: `{1: {fitness_type_id echo}, 2: steps_frequency_minutes,
-  3: steps_raw, 4: distance_frequency_minutes, 5: distance_raw,
-  6: calorie_frequency_minutes, 7: calorie_raw}`. `frequency` was `60`
-  (minutes) in every capture, giving 24 hourly buckets; each `*_raw` array
-  was 48 bytes = **2 bytes per bucket, big-endian unsigned**. Byte order is
-  confirmed by a non-zero capture: a day whose 21:00 and 23:00 hours held 29
-  and 95 steps encoded those buckets as `00 1d` and `00 5f`, matching the
-  app's own decode of the same bytes. `protocol.unpack_buckets` does that
-  decode; `DailyData` carries both the raw bytes and the decoded
-  `steps`/`distance`/`calories` lists. Distance is metres (the app stores a
-  3 km goal as `3000`, and live pushes report ~0.8 m per step); the calorie
-  unit is unconfirmed. The app's protobuf class declares further fields
-  (8: HBA data, 9..15: today-only step/calorie variants) that this model has
-  never sent.
-- **`ContinuousHeartRate`**: `{1: echo, 2: frequency_minutes (5 observed,
-  giving 288 buckets/day), 3: heart_rate_raw, 4: max_value, 5: min_value,
-  6: resting_value, 7: hour_max_raw (24 bytes), 8: hour_min_raw (24 bytes)}`.
-  **1 byte per bucket**, confirmed against a non-zero capture: a day whose
-  only reading was 60 bpm at 05:20 had byte 64 of the 288-byte array set to
-  60, matching the app's decode. A zero bucket means "no sample taken", not
-  a measured zero — the hour arrays were all-zero even on that day.
-- **`SleepData`** (function_type 1): `{1: echo, 2: start_sleep_timestamp,
-  3: end_sleep_timestamp, 4: sleep_duration, 5: sleep_score,
-  6: awake_time, 7: awake_time_percentage, 8: light_sleep_time,
-  9: light_sleep_time_percentage, 10: deep_sleep_time,
-  11: deep_sleep_time_percentage, 12: rapid_eye_movement_time,
-  13: rapid_eye_movement_time_percentage, 14: {1: [stage, ...repeated]},
-  15: sleep_type, 16: sleep_readiness_score}` — see "Sleep data" below.
-- **`EffectiveStanding`** (function_type 11, response field 14):
-  `{1: echo, 2: frequency_minutes (60), 3: raw (24 bytes)}` — no further
-  fields exist in the app's protobuf class either.
-- **`ActivityDuration`** (function_type 12, response field 15):
-  `{1: echo, 2: frequency_minutes (60), 3: raw (24 bytes),
-  4: daily_time, 5: daily_percentage, 6..31: 13 (time, percentage) pairs,
-  one per sport category}`. Unlike the other beans, everything past `raw` is
-  **separate varint fields**, not a packed byte array — so those are an
-  exact decode, no byte-order guessing needed. The category order (running,
-  walking, cycling, swimming, fitness exercise, outdoor, ball game, yoga,
-  winter, dance movement, aquatic, leisure, other) is the app's own
-  `SEActivityDurationData` field order. Field 5 (`daily_percentage`) was
-  `100` with everything else 0 in the captures so far.
-
-### `CONFIRM_FITNESS_TYPE_ID` (115) — acknowledge a bucket
-
-Identical request shape to `REQUEST_FITNESS_TYPE_ID` (same
-`encode_fitness_type_id_request`, different command id), sent immediately
-after processing that bucket's data. Response is just the generic
-ack/error-code shape below — no bean data.
-
-### The generic ack/error-code response shape
-
-`{1: <command_id echo>, 100: <varint, 0 = success>}` — e.g. `08 71 a0 06 00`
-decodes to `{1: 113, 100: 0}`. Seen for `SET_SYSTEM_TIME`, `CONFIRM_FITNESS_TYPE_ID`,
-and — importantly — **also returned by `REQUEST_FITNESS_TYPE_ID` itself**
-when there's nothing to send.
-
-Buckets are **not** single-consume, though: in the 2026-08-31 capture the
-app re-requested and re-confirmed the same `(2026-08-30, sleep)` bucket in
-four separate sessions and got the full, byte-identical data bean every
-time. The empty-success shape means the watch has no data for that
-`(date, function_type)` — not that it has already handed it over once.
-
-### Heart-rate sampling frequency (`function_type` 2)
-
-`ContinuousHeartRate.frequency_minutes` is the sampling interval the watch
-recorded that day with, and it is the **only** thing that says how the
-array maps onto the clock — never assume a fixed bucket count. Every
-capture so far reported `5`, giving `1440 / 5` = **288 buckets per day**, so
-bucket `i` covers local time `i * 5` minutes past midnight (bucket 64 =
-05:20). The array length has matched `1440 / frequency` exactly in every
-capture; treat a mismatch as a decode error rather than padding.
-
-Two consequences worth keeping in mind when consuming this data:
-
-- **A zero bucket means no sample was taken, not a heart rate of zero.**
-  Skip zeros rather than averaging them in. On a real captured day, 287 of
-  the 288 buckets were zero and one held 60 bpm — the watch is not sampling
-  every 5 minutes around the clock even though the frequency says 5.
-- `max_value` / `min_value` are the watch's own summary over the non-zero
-  samples (both were 60 on that day, consistent with the single sample);
-  `resting_value` was 0, i.e. not computed, with that little data.
-
-The frequency is a per-day property of the returned bean, not a constant of
-this model: the watch's own "continuous heart rate" setting is expected to
-change it (see `TODO.md`), so re-read `frequency_minutes` per bucket instead
-of hard-coding 5 or 288.
-
-The separate `hour_max_raw` / `hour_min_raw` arrays are 24 bytes each, one
-byte per hour of the day, and were all-zero even on the day that had a
-sample — so their exact semantics are unconfirmed.
-
-### Sleep data (`function_type` 1)
-
-One bucket = one night, requested exactly like any other fitness bucket:
-`REQUEST_FITNESS_TYPE_ID` (113) with `function_type` 1 and the date of the
-**evening** the night started (a night spanning 2026-08-30 22:39 → 2026-08-31
-05:17 is offered and returned under the date 2026-08-30). The bean comes
-back in field 5 of the response's field-9 wrapper. `protocol.parse_sleep_data`
-→ `SleepData`; `zeblaze-ble sleep <ADDRESS>` fetches only these buckets.
-
-Summary fields: `start_sleep_timestamp` / `end_sleep_timestamp` are Unix
-seconds in the watch's local time zone. `sleep_duration` and every
-`*_time` field are **minutes**; every `*_percentage` is a whole percent of
-`sleep_duration`. `sleep_score` is the app's 0-100 sleep score.
-`sleep_type` (field 15) is `1` = night sleep, `0` = daytime sleep
-(`protocol.SLEEP_TYPE_*`).
-
-Field 14 is the stage timeline, with the usual extra wrapper level:
-`{1: [{1: start_timestamp, 2: sleep_duration, 3: sleep_distribution_type},
-...repeated]}`. Each entry is one contiguous stretch of a single stage, in
-chronological order; `sleep_duration` is again minutes. The stage enum
-(`protocol.SLEEP_STAGE_*`) is `0` = awake, `1` = light, `2` = deep,
-`3` = rapid eye movement. The **last entry is a wake-up marker**: stage
-awake with duration 0, timestamped at `end_sleep_timestamp`.
-
-Verified against a live night (see `tests/test_protocol.py`, which parses
-the captured payload): 16 stage entries, and the per-stage durations summed
-by stage reproduce `light_sleep_time` = 295 and `deep_sleep_time` = 103
-exactly, with `sleep_duration` = 398 = their sum.
-
-### Real-time push: `REAL_TIME_DATA_SWITCH` (164) / `REPORT_BASIC_DATA` (165)
-
-Request (verified against the one live capture, `protocol.encode_real_time_data_switch_request`):
-`{1: 164, 12: {3: <0 or 1>}}` — field 3's exact on/off encoding is a
-best-effort guess (only an "enable" capture exists; `0` was captured for
-enable, so `False`/disable is assumed to be `1`, unverified).
-
-Sending this makes the watch start pushing unsolicited `REPORT_BASIC_DATA`
-(165) messages on the notify channel every few seconds (no further request
-needed per push — this is the one message in the whole protocol that
-arrives without the app having asked for that specific instance).
-`gatttool_transport.enable_real_time_data_and_listen` just calls
-`receive_message()` in a loop, since unsolicited and solicited messages use
-the identical chunked-transport framing.
-
-Response shape: `{1: 165, 12: {4: <bean>}}` (note: same double-wrapper
-pattern as `GET_DEVICE_INFO`'s field 4). Bean, `protocol.RealTimeData`:
-
-```
-1: steps (varint)
-2: calories (varint)
-3: distance (varint)
-4: heart_rate (varint)
-5: blood_oxygen (varint)
-6: effective_standing (varint)
-7: battery {1: capacity, 2: charge_status}   -- identical shape to GET_DEVICE_INFO's battery field
-8, 9: varint, always 0 in captures, meaning unidentified
-10: physiologicalCycle submessage (19 bytes, menstrual-cycle tracking fields) -- not parsed, not exposed
-13: varint, always 0, meaning unidentified
-16: steps_hourly_raw (48 bytes, 2 bytes/hour -- same byte-order caveat as DailyData)
-17: distance_hourly_raw (48 bytes)
-18: calorie_hourly_raw (48 bytes)
+```text
+08 a4 01 62 02 18 00
 ```
 
-Live-tested 2026-08-29: connected, enabled real-time data, and successfully
-decoded a real `RealTimeData` reading — `battery_capacity=67,
-battery_charge_status=2` (matching the independently-verified `battery`
-command result from the same session), everything else `0` since this was
-a same-day-bound device with no accumulated activity yet.
+The watch answers command 164 by pushing command 165.
 
-### `steps`/`calories`/`distance` update live; `heart_rate` may not, on the timescale tested
+### Binding completion event: command 27
 
-Live-tested again later the same day with an actual workout in progress
-(`zeblaze-ble realtime` polled repeatedly): `steps`, `calories`, and
-`distance` visibly incremented between polls (e.g. `steps` 2205→2223 over
-106s, `calories` continuing to climb even in a later poll where `steps`
-and `distance` had stopped moving), and the current-hour bucket in
-`steps_hourly_raw`/`distance_hourly_raw` incremented by *exactly* the same
-amount as the running totals each time — strong confirmation these are
-genuinely live, not cached. `heart_rate`, however, read exactly `95` across
-three consecutive polls spanning about 4 minutes, while everything else
-around it changed. Not conclusive either way yet: 4 minutes might still be
-inside a single measurement interval this field updates on (the
-*different* command `ContinuousHeartRateBean.continuousHeartRateFrequency`
-observed `5` (minutes) elsewhere in this protocol, which is suggestive but
-not proven to be the same interval `RealTimeData.heart_rate` uses — no
-capture has confirmed that assumption). Needs a longer-spaced poll (>5-10
-min apart) to confirm whether it's periodic-but-slower or actually stuck;
-see `TODO.md`.
+Command 27 is watch-originated and carries classic-radio state:
 
-
-## Workout data: GPS track and summary (117 / 119 / 121, activity channel `6f03`)
-
-### GATT channel: `16186f03`
-
-Workout data uses a **third** characteristic, `16186f03`
-(`ACTIVITY_DATA` in `protocol.py`),
-value handle `0x0027` / CCCD `0x0028` on this firmware. Same chunked
-transport (header/ready-ack/data-chunks/complete-ack, byte-identical to
-what's documented above), just carrying much larger payloads and, unlike
-`6f01`/`6f02`, spanning **multiple consecutive rounds** of that transport
-for one logical transfer (see below).
-
-### `GET_FITNESS_SPORT_ID_LIST` (117) — what's queued
-
-Request: `08 75` (just the command id, like `GET_FITNESS_TYPE_ID_LIST`).
-Response shape `{1: 117, 9: {3: <sport ids>}}`, where `sport ids` is a
-concatenation of 7-byte entries, one per available data blob for the
-queued workout(s):
-
-```
-[0:4] timestamp (LE uint32, this workout's start time)
-[4]   constant byte (0x08 in the one capture -- meaning unconfirmed)
-[5]   sport_type (single byte, 2 = observed for a walk/run)
-[6]   flags byte; low 2 bits = data type (SPORT_DATA_POINT=0,
-      SPORT_DATA_REPORT=1, SPORT_DATA_GPS=2); upper 6 bits constant
-      across all 3 entries in the one capture (meaning unconfirmed)
+```text
+08 1b 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
 ```
 
-The one capture had exactly 3 entries for the one workout: GPS, POINT, and
-REPORT (in that order). `protocol.parse_sport_id_list`.
+Do not synthesize command 27 from the host. Receive and acknowledge it using
+the normal chunked transport, then query commands 16 and 19.
 
-The queue can hold entries for **more than one** past workout at once, each
-group of (typically 3) entries sharing the same `timestamp` field
-(confirmed live 2026-08-29: recording a second workout added a second
-group of 3 entries with a different timestamp alongside the first, still
-listed). A `REQUEST_FITNESS_SPORT_DATA`/`CONFIRM_FITNESS_SPORT_ID_LIST`
-call's `sport_ids` blob should therefore select **one workout's entries at
-a time** (`protocol.latest_workout_entries` picks the most recent group) —
-bundling entries from more than one workout into a single request means
-that request only splits successfully if every one of those entries' data
-can be located, so one unfetchable workout (e.g. one the watch has stopped
-offering real data for, see "`CONFIRM_FITNESS_SPORT_ID_LIST` must only
-follow a verified-complete transfer" below) blocks every other workout
-bundled with it too.
+### User verification: command 19
 
-### `REQUEST_FITNESS_SPORT_DATA` (119) — fetch it, and `CONFIRM_FITNESS_SPORT_ID_LIST` (121) — acknowledge it
+Request for user `2011999`:
 
-Both share the identical request shape `{1: command_id, 9: {3: sport_ids}}`
-(the *same* 21-byte blob from 117's response, echoed back verbatim — no
-need to re-encode the individual 7-byte entries, `encode_fitness_sport_id_list_request`
-just takes the raw concatenated bytes). This is a shallower shape than
-`encode_fitness_type_id_request`'s date+type selector; don't confuse the
-two.
-
-**119 gets no reply on the normal command channel.** Every other command
-in this protocol gets a response (or at least an ack) on `6f01`; 119
-doesn't. Instead, sending it makes the watch start pushing the actual data
-on the activity channel (`6f03`) instead — the bulk transfer itself *is*
-the reply. Only after that transfer finishes does the app send 121, which
-*does* get a normal `{1: 121, 100: 0}` ack on `6f01`.
-
-### The activity-channel transfer: multiple rounds, no wire-level boundary marker, either GATT channel
-
-The single offline capture showed the watch sending the 3 requested
-entries' combined ~7.8KB of data as **7 separate header/ready-ack/chunks/
-complete-ack rounds** back to back on `6f03` (chunk counts `7, 7, 7, 7, 5,
-1, 1` — 35 individual data-chunk notifications, ~225 bytes each, consistent
-with the negotiated 247-byte ATT MTU).
-
-A round's header is not guaranteed to arrive on `6f03`: it can also arrive
-on `6f01` (the normal command-response channel), observed live for the
-first round of a real transfer. A receiver must accept a round's header on
-*either* handle and complete that round (ready-ack, chunks, complete-ack)
-on whichever handle it arrived on — see
-`GatttoolSession.receive_all_activity_data`.
-
-`zeblaze_ble` uses a robust strategy: `receive_all_activity_data` keeps
-receiving rounds and concatenating them into one buffer until no new round
-*starts* within a grace period (default 3s after the first round, longer —
-matching the normal per-message timeout — for the first round itself,
-since a live transfer's first round can take noticeably longer than 3s to
-begin). A round already in progress still gets the normal per-notification
-timeout, only the wait for the *next* round's header is bounded by the
-grace period. Then, since every entry's data starts with that entry's own
-7-byte id (already known from the 117 response),
-`protocol.split_sport_data_blobs` finds each id's byte offset in the
-combined buffer and slices between them.
-
-### `CONFIRM_FITNESS_SPORT_ID_LIST` must only follow a verified-complete transfer
-
-Send 121 only after `split_sport_data_blobs` has confirmed every requested
-entry is present in the received bytes. Confirming a partial or empty
-transfer tells the watch the data was delivered: a repeated
-`REQUEST_FITNESS_SPORT_DATA` for the same entries after a premature confirm
-no longer returns the real payload, only a fixed 29-byte reply, byte-identical
-across retries:
-
-```
-08 1b 1a 19 42 17 08 00 10 01 1a 11 44 36 3a 34 35 3a 31 35 3a 33 30 3a 30 34 3a 37 31
+```text
+08 13 1a 09 32 07 32 30 31 31 39 39 39
 ```
 
-which decodes to `{1: 27, 3: {8: {1: 0, 2: 1, 3: "<watch MAC as ASCII>"}}}`
-— command id 27 is never sent by this tool, and the shape doesn't match the
-generic ack (`{1: <echoed command id>, 100: <code>}`) used everywhere else
-in this protocol. **It is unrelated to fitness**: 27 is
-`REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` and the payload is
-`SEBindAccount.classicBluetoothStatus` — see "Classic-Bluetooth status"
-below. It appears in this window only because the watch emits it whenever
-its classic link is down, which it always is for this tool. The earlier
-reading of it as a fitness "already delivered, nothing to send" reply is
-retracted. Separately, a premature confirm
-reproducibly and, so far, permanently makes the real payload for those
-entries unobtainable. `request_workout_data` raises instead of confirming
-when the drain comes back incomplete.
+Shape: `{1:19, 3:{6:"2011999"}}`.
 
-**`REQUEST_FITNESS_SPORT_DATA` itself may be one-shot per entry id,
-independent of whether `CONFIRM_FITNESS_SPORT_ID_LIST` is ever sent.**
-Live-tested 2026-08-29: a workout whose entries had only ever been sent in
-a *bundled* `REQUEST_FITNESS_SPORT_DATA` call (mixed with another,
-already-stale, workout's entries — a call that never reached the confirm
-step, since the mixed-in stale entry made `split_sport_data_blobs` fail
-first) later returned only the `{1: 27, ...}` stub on every subsequent
-`REQUEST_FITNESS_SPORT_DATA` retry for *just that workout's own entries in
-isolation*, across 8 separate attempts. If confirming were the only thing
-that marked an entry as delivered, an unconfirmed entry should still have
-been re-offerable. It wasn't. Treat every `REQUEST_FITNESS_SPORT_DATA` call
-for a given entry id as consuming that id's one real-data delivery, not
-just every confirmed one — so don't retry a failed/partial workout fetch by
-re-sending `REQUEST_FITNESS_SPORT_DATA` for the same ids; a fresh workout
-recording is the only known way to get a usable id again.
+Verified and bound response:
 
-### `SPORT_DATA_REPORT` (dataType 1) — workout summary, 103 bytes in the one capture
-
-Every offset below was found by searching the real 103-byte blob for this
-workout's already-known values (from `sportmodleinfo`/`exerciseoutdoor` in
-the phone's own database) and confirming the match exactly — not guessed:
-
-```
-[0:7]   sport entry id (7 bytes)
-[7]     status byte (0 observed)
-[8:12]  unknown
-[12:16] start_time (LE uint32 -- duplicates the entry id's own timestamp)
-[16:20] end_time (LE uint32)
-[20:24] duration_seconds (LE uint32)
-[24:28] distance_meters (LE uint32)
-[28:30] calories (LE uint16)
-[30:42] unknown
-[42:44] steps (LE uint16)
-[44:48] unknown
-[48]    avg_heart_rate (single byte)
-[49]    max_heart_rate (single byte)
-[50]    min_heart_rate (single byte)
-[51:84] zero in the one capture (probably reserved/other-sport-type fields,
-        e.g. swim laps or cycling cadence, not applicable to a walk)
-[84:]   non-zero tail (19 bytes), meaning unidentified -- possibly a checksum
+```text
+08 13 1a 06 3a 04 08 01 10 01
 ```
 
-Live values matched the phone's database exactly: `distance_meters=1552`,
-`steps=1657`, `avg_heart_rate=105`, `max_heart_rate=131`,
-`min_heart_rate=63`, `duration_seconds=1428`. `protocol.parse_workout_report`.
+The nested fields are `{verify_result_type:true, binding_status:true}`.
 
-### `SPORT_DATA_GPS` (dataType 2) — GPS track, 6745 bytes / 561 points in the one capture
+## Unbinding
 
-```
-[0:7] sport entry id [7] status byte (0) [8] unknown (0xE0 observed)
-[9:]  repeating 12-byte point records:
-        [+0:4] timestamp (LE uint32, absolute Unix seconds)
-        [+4:8] longitude (LE float32)
-        [+8:12] latitude (LE float32)
+Command 23 clears the application binding:
+
+```text
+-> 08 17
+<- 08 17 a0 06 00
 ```
 
-A 4-byte remainder after the last full 12-byte record is
-unaccounted for (too short to be another point; likely a footer/checksum).
-`protocol.parse_gps_track`.
+This operation is destructive. Disconnecting BLE or removing an operating
+system bond is separate from protocol-level unbinding.
 
-### `SPORT_DATA_POINT` (dataType 0) — not decoded
+## Classic Bluetooth status
 
-1020 bytes in the one capture, same 9-byte header pattern as GPS, but the
-per-record structure wasn't cracked (unlike GPS/REPORT, no known ground
-truth values were available to search for — the app's own
-`DevSportInfoBean` fields didn't expose an obviously-corresponding parsed
-array to check candidate byte offsets against). Byte-level inspection
-found plausible-range values resembling per-interval heart rate samples
-(bytes in the 85-95 range recurring with some regularity) but nothing
-confirmed. Exposed as `WorkoutData.point_data_raw` (raw bytes only).
+Commands 25 and 27 carry `SEClassicBluetoothStatus` in envelope field 8:
 
-## Push notification: `SEND_SYSTEM_NOTIFICATION` (178) (INCOMPLETE)
+| Field | Meaning |
+| ---: | --- |
+| 1 | Classic link connected |
+| 2 | Classic radio enabled |
+| 3 | Watch classic MAC address |
 
-Structure: `{1: 178, 13: {1: {1: type, 2: phoneNumber, 3: contactsInfo,
-4: messageText}}}` — i.e. field 13 of the same `SEWear{1: id, ...}` envelope
-every other command uses, holding a `SENotification{1: SESystemNotification{...}}`.
-`type` (varint enum, `com.zh.ble.wear.protobuf.NotificationProtos.SESystemNotification.SEType`):
-`0` = `CALL`, `1` = `MISS_CALL`, `2` = `MESSAGE`. For `CALL`, the app itself
-always forces `messageText` to `""` regardless of what's passed —
-`protocol.encode_system_notification_request` replicates this.
+Command 25 queries the state:
 
-The real app always sends `VERIFY_USER_NUMBER` (19, see "Other command
-payloads seen but not decoded" above) immediately after connecting, before
-any data command. `gatttool_transport.send_notification` once had a
-`warmup` parameter (`none`/`verify`/`full`) replicating that prelude; it
-was removed 2026-08-30 after live testing across all three modes showed
-every one gets the same `{1: 178, 100: 0}` ack (`08 b2 01 a0 06 00`, code
-0 = success) — the ack does not depend on which of these BLE commands, if
-any, precede the notification — and each extra prelude command was itself
-a source of the documented ack flakiness.
-
-**Live-tested, still unresolved**: whether/when the watch actually
-*displays* the notification's content is a separate question from the ack
-above, and is not yet understood — investigation history and current
-hypotheses live in `TODO.md`'s "notify" entry (and `JOURNAL.md` for the
-narrative); local-Bluetooth-stack diagnostics attempted along the way are
-in `bluetooth-problems.md`.
-
-## App push notification: `SEND_APP_NOTIFICATION` (179)
-
-Structure: `{1: 179, 13: {2: {1: appName, 2: pageName, 3: title, 4: text,
-5: tickerText}}}` — the same `SEWear` envelope and field 13 as 178, but
-holding `SENotification{2: SEAppNotification{...}}` (appNotification is
-field 2 of `SENotification`; systemNotification is field 1). This is the
-command the real app uses for every third-party notification.
-
-**Ground truth (2026-08-31, 07:39:21):** a Gmail notification the watch
-displayed correctly, captured in the app's own BLE debug log and confirmed
-byte-for-byte in the HCI snoop of the same write:
-
+```text
+-> 08 19
+<- 08 19 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
 ```
-01 00 08 b3 01 6a 5f 12 5d
+
+Command 27 is the watch-originated form. A false first field and true second
+field means that the classic radio is enabled with no classic link connected.
+
+Classic Bluetooth and HFP are not required for command 179 after application
+binding. Notification content travels over BLE.
+
+## Device information
+
+Command 32 request: `08 20`.
+
+Response shape:
+
+```text
+{
+  1:32,
+  4:{
+    1:{
+      1: firmware_version,
+      2: equipment_number,
+      3: mac,
+      4: serial_number,
+      5:{1:battery_percent, 2:charge_status},
+      6: remote_camera_switch,
+      7: sports_icon_protocol_switch
+    }
+  }
+}
+```
+
+`protocol.parse_device_info()` decodes this structure.
+
+## App notifications: command 179
+
+```text
+{
+  1:179,
+  13:{
+    2:{
+      1: appName,
+      2: pageName,
+      3: title,
+      4: text,
+      5: tickerText
+    }
+  }
+}
+```
+
+Example:
+
+```text
+08 b3 01 6a 5f 12 5d
   0a 05 "Gmail"
   12 15 "com.google.android.gm"
   1a 10 "Martin Monperrus"
@@ -692,574 +346,298 @@ byte-for-byte in the HCI snoop of the same write:
   2a 10 "Martin Monperrus"
 ```
 
-(`01 00` is the data-chunk header; the frame is a single chunk, sent on
-`6f02` after the usual `00 00 00 00 01 00` header / `00 00 01 01 00 00`
-ready-ack handshake, and acked with `08 b3 01 a0 06 00` arriving on
-`6f01`. No precondition command of any kind precedes it in the capture.)
-`tests/test_protocol.py` pins `encode_app_notification_request` to these
-exact bytes.
+Field semantics:
 
-### Where each field comes from, and why `pageName` matters
+| Wire field | CLI option | Meaning |
+| --- | --- | --- |
+| `appName` | `--app` | Display label, such as `Gmail` |
+| `pageName` | `--page` | Android package name, such as `com.google.android.gm` |
+| `title` | `--sender` | Notification title/sender line |
+| `text` | `--text` | Body text |
+| `tickerText` | `--ticker` | Short summary; defaults to `--sender` |
 
-`MyNotificationsService.onNotificationPosted` fills the five strings from
-one Android `StatusBarNotification`:
+`pageName` must not be empty and should correspond to `appName`. Title and
+ticker text are capped at 50 characters; body text is capped at 200. The
+encoder shortens overlong values using `value[:limit-1] + "..."`.
 
-| field | source |
-|---|---|
-| `pageName` | `StatusBarNotification.getPackageName()` — e.g. `com.google.android.gm` |
-| `appName` | `AppUtils.getAppName(pageName)` — the package's display label, e.g. `Gmail` |
-| `title` | the `android.title` extra |
-| `text` | the `android.text` extra |
-| `tickerText` | `Notification.tickerText` — Android's short summary line |
+Success response:
 
-So `pageName` is the **package name, and the root the app derives `appName`
-from**; it is structurally never empty in a real send. An earlier note here
-called it "unused by the app for third-party notifications" — that was
-wrong, and it was the one field this repo's `app-notify` always sent empty.
-`encode_app_notification_request` now rejects an empty `page_name`.
-
-Note also that in the working capture `tickerText` equals the **title**
-(the sender name), not the body — Android's ticker is a summary line, not
-the message. The CLI's `--ticker` therefore defaults to `--sender`.
-
-`ControlBleTools.sendAppNotification` truncates title/ticker at 50 chars
-and text at 200 (`s[:max-1] + "..."`, `BleUtils.truncateString`) and applies
-**no** cap to appName/pageName — its smali truncates only its p3/p4/p5
-arguments. `protocol.py` replicates that exactly.
-
-### Prior live tests, and what they were actually showing
-
-Live-tested 2026-08-30, BLE-only: every 179 was acked `{1: 179, 100: 0}`
-(`08 b3 01 a0 06 00`) with no precondition commands, including multi-chunk
-payloads (~226 bytes → 2 chunks). **Ack ≠ display**: during that session
-every 179 was acked while the watch showed one stale cached banner and
-discarded the new payloads — the watch was in a user-id-mismatch bind state
-at the time (see "Binding" below), which has since been repaired. So the
-ack proves delivery to the watch's protocol layer only.
-
-Re-tested 2026-08-31, BLE-only, after the `pageName` fix: a 179 carrying
-the *captured working frame's own* field values (appName `Gmail`,
-pageName `com.google.android.gm`, tickerText = title, only the body text
-changed) was acked `08 b3 01 a0 06 00` and still did not display -- the
-watch kept showing the same stale cached banner. A populated `pageName` is
-therefore **not** what makes the watch display a notification, and neither
-is bind state (see "Binding" below, where 16/19 were queried in the same
-session and both came back healthy). The ack-vs-display gap is unexplained;
-the remaining documented difference between this tool and the phone is the
-link itself -- the phone's LE link is bonded and encrypted and it holds a
-classic HFP link, this tool's is neither (see "Link security" below).
-
-An earlier note claimed the watch draws its body line from tickerText and
-falls back to the title; that was an artifact of the stale-banner session
-above, and is retracted — the field mapping in the table above supersedes
-it.
-
-## Event reminders: `SET_EVENT_INFO_LIST` (212) / `GET_EVENT_INFO_LIST` (211)
-
-Captured live 2026-08-31 from the official app (`controlbletools ->
-setEventInfoList()/getEventInfoList()`), cross-checked byte-for-byte against
-the HCI snoop of the same session. **This is the only confirmed way to get
-arbitrary phone-authored text to render on this watch's screen** — see the
-caveat at the end.
-
-Envelope field is **15** (`0x7a`, `SEEvent`), not the 13 that the
-notification commands use. Inside it, field 2 is the list message:
-
+```text
+08 b3 01 a0 06 00
 ```
+
+The watch displays the fields when application binding is valid. No Classic
+Bluetooth or HFP connection is required.
+
+## System notifications: command 178
+
+```text
+{
+  1:178,
+  13:{
+    1:{
+      1:type,
+      2:phone_number,
+      3:contacts_info,
+      4:message_text
+    }
+  }
+}
+```
+
+Types:
+
+| Value | Meaning |
+| ---: | --- |
+| 0 | Call |
+| 1 | Missed call |
+| 2 | Message |
+
+`protocol.encode_system_notification_request()` implements this shape.
+
+## Event reminders
+
+Commands 211 and 212 use envelope field 15:
+
+```text
 SEEventInfoList {
-  1: repeated EventInfo   # the whole list, resent in full on every set
-  2: support_max_events   # read-only, watch-reported; 5 on this model
+  1: repeated EventInfo
+  2: support_max_events
 }
+
 EventInfo {
-  1: description  # string, the text the watch displays
-  2: time { 1:year 2:month 3:day 4:hour 5:minute 6:second }   # same submessage as everywhere else
-  3: is_finish    # bool, request-only; the watch's echo omits it
+  1: description
+  2: time {1:year, 2:month, 3:day, 4:hour, 5:minute, 6:second}
+  3: is_finish
 }
 ```
 
-`SET_EVENT_INFO_LIST` (212) request — two events, "vgvg" at 07:09 and "hgv"
-at 07:29 on 2026-08-31:
+Command 212 replaces the complete reminder list and returns generic success.
+Command 211 returns the stored list and maximum list size. This watch reports
+a maximum of five reminders. Reminders fire locally from the watch clock at
+minute granularity.
 
-```
-08 d4 01 7a 33 12 31
-  0a 17 0a 04 76 67 76 67  12 0d 08 ea 0f 10 08 18 1f 20 07 28 09 30 00  18 00
-  0a 16 0a 03 68 67 76     12 0d 08 ea 0f 10 08 18 1f 20 07 28 1d 30 00  18 00
-```
+## Fitness data
 
-Response is the plain ack `08 d4 01 a0 06 00` (`{1: 212, 100: 0}`).
+### Time submessage
 
-`GET_EVENT_INFO_LIST` (211) request is the bare `08 d3 01`; the response
-echoes the stored list plus the cap, with field 3 (`is_finish`) stripped:
+Fitness selectors use:
 
-```
-08 d3 01 7a 31 12 2f
-  0a 15 0a 04 76 67 76 67 12 0d 08 ea 0f 10 08 18 1f 20 07 28 09 30 00
-  0a 14 0a 03 68 67 76    12 0d 08 ea 0f 10 08 18 1f 20 07 28 1d 30 00
-  10 05
+```text
+{1:year, 2:month, 3:day, 4:hour, 5:minute, 6:second}
 ```
 
-With no events stored the response is `08 d3 01 7a 04 12 02 10 05`, i.e.
-just `support_max_events: 5`.
+Implemented by `protocol.encode_time()`.
 
-Semantics, as observed: 212 replaces the entire list (there is no add/delete
-command — to remove an event, resend the list without it). The watch then
-fires each event **locally, from its own clock**, at the stored
-minute — in the capture, the 07:29 event displayed its text on the watch at
-07:29 with **no BLE or classic-BT traffic at all in that second**. So this
-is a scheduled local reminder, not a push: it gets text onto the screen, but
-only at a minute-granular pre-programmed time, and only 5 at a time. It does
-not answer the open `SEND_SYSTEM_NOTIFICATION` (178) display question.
+### Available buckets: command 112
 
-## The watch holds a classic-BT HFP link while the app is connected
+Request: `08 70`.
 
-Also from the 2026-08-31 capture, and relevant to the 178-display question:
-the watch (`d6:45:15:30:04:71`, the "…Calling_0471" model) opens a **BR/EDR
-ACL** to the phone (`HCI Connection Complete`, handle 0x8) and then a full
-**Hands-Free Profile** session over RFCOMM — the watch is the HF, the phone
-the AG: SDP queries for `0x111e` (Handsfree) followed by `AT+BRSF=255`,
-`AT+CIND=?`, `AT+CMER`, `AT+CHLD`, `AT+COPS` and periodic `+CIEV:` indicator
-pushes from the phone. This is a live, ordinary HFP link running alongside
-the BLE GATT session for the entire capture.
+Response:
 
-No message-access (MAP/MNS) channel is opened, and no notification text
-crosses the classic link — so classic BT is not *carrying* notification
-content here. But its mere presence is what a pure-BLE Linux client lacks,
-and matches the standing hypothesis in `TODO.md` that this model gates
-notification *display* on having a classic link.
-
-## Binding: `BINDING_CHECK` (17) and `BINDING_RESULT` (18)
-
-Captured live 2026-08-30, from the official app's own BLE debug log while
-re-binding the watch after the user-id-mismatch state (see JOURNAL.md's
-2026-08-30 entry). Field numbers verified against the decompiled
-protobuf classes (`BindAccountProtos.SEBindAccount`: bindCheck = 2,
-bindResult = 3; `SEBindCheck`: bindCheckResult = 1, deviceVerify = 2,
-bindRandomKey = 3; `SEBindResult`: bindResultType = 1, userId = 2,
-phoneType = 3, and enums `SEBindResultType` REFUSE=1/OVER_TIME=2, so
-SUCCESS=0 by elimination, and `SEPhoneType` ANDROID=0/IOS=1).
-
-Bind sequence the real app runs:
-
-1. `INQUIRY_BINDING_STATUS` (16) → `request_binding_status: false` means
-   the watch considers itself unbound.
-2. `BINDING_CHECK` (17): `08 11 1a 04 12 02 08 01`
-   = `{1: 17, 3: {2: {2: {1: 1}}}}` — `SEBindAccount.bindCheck{
-   deviceVerify: true}`. (The smali overload with `deviceVerify=false`
-   instead sets `bindRandomKey`, used for the verify-by-key path.)
-3. `BINDING_RESULT` (18): `08 12 1a 0f 1a 0d 08 00 12 07 "2011999" 18 00`
-   = `{1: 18, 3: {3: {1: 0, 2: "2011999", 3: 0}}}` —
-   `SEBindAccount.bindResult{bindResultType: SUCCESS, userId,
-   phoneType: ANDROID}`.
-4. `INQUIRY_BINDING_STATUS` (16) → now `request_binding_status: true`.
-5. `VERIFY_USER_NUMBER` (19) → `verify_result_type: true`.
-
-`VERIFY_USER_NUMBER`'s reply `3a 04 08 00 10 01` decodes to
-`{7: {1: 0, 2: 1}}` = `verifyResult{verify_result_type: false,
-binding_status: true}` (SEBindAccount.verifyResult = field 7,
-SEVerifyResult: verifyResultType = 1, bindingStatus = 2). While
-`verify_result_type` is false the watch is in the user-id-mismatch state.
-
-**A healthy bind is not sufficient for display** (measured 2026-08-31,
-BLE-only from this tool, minutes after a 179 that acked and did not
-display):
-
-- `INQUIRY_BINDING_STATUS` (16) → `08 10 1a 02 08 01` =
-  `{1: 16, 3: {1: 1}}`, `request_binding_status: true`.
-- `VERIFY_USER_NUMBER` (19) → `08 13 1a 06 3a 04 08 01 10 01` =
-  `{1: 19, 3: {7: {1: 1, 2: 1}}}` = `verifyResult{verify_result_type: true,
-  binding_status: true}` — note the `08 01`, the opposite of the
-  mismatch reply's `08 00` above.
-
-So the bind is intact and verified, and the watch still acked a 179 it did
-not show. Bind state alone does not gate display.
-
-The complete request bytes were captured again in a fresh, successful bind
-on 2026-08-31 after an app unbind. The watch was unbound (`16` returned
-`request_binding_status: false`), and the official app sent:
-
-```
--> 08 11 1a 04 12 02 08 01
-   # {1:17, 3:{2:{2:{1:true}}}}  BINDING_CHECK(device_verify=true)
-<- 08 11 ...                         # app parses success
-
--> 08 12 1a 0f 1a 0d 08 00 12 07 "2011999" 18 00
-   # {1:18, 3:{3:{1:SUCCESS, 2:user_id, 3:ANDROID}}}
-<- 08 12 a0 06 00                    # {1:18, 100:0}
+```text
+{1:112, 9:{2:{1:[{1:time, 2:function_type}, ...]}}}
 ```
 
-The app's `BINDING_CHECK` parse log says `device_verify: false` and
-`bind_check_result: SUCCESS`; the request's `device_verify=true` is its
-selected bind path, not a direct echo of that response field. A later status
-query returned `request_binding_status: true`, and `VERIFY_USER_NUMBER` also
-reported a healthy verified binding.
+Known function types:
 
-`protocol.encode_binding_check_request()` and
-`protocol.encode_binding_result_request(user_id)` now reproduce these two
-requests byte-for-byte. They are deliberately protocol-level encoders only:
-they are **not a complete reproduction of the app bind**. The official app's captured
-ordering is:
+| Type | Data |
+| ---: | --- |
+| 0 | Daily steps, distance, calories |
+| 1 | Sleep |
+| 2 | Continuous heart rate |
+| 11 | Effective standing |
+| 12 | Activity duration |
 
-1. Query 16 and receive `request_binding_status: false`.
-2. Send 17 and receive the watch identity (type, MAC, serial, firmware).
-3. Submit that identity to the vendor backend's bind-device endpoint with
-   `userId`, `deviceMac`, `deviceName`, `deviceSn`, `deviceType`, and
-   `deviceVersion`. In the 2026-08-30 successful bind, the app logged the
-   backend request at 12:45:51.779 and its `code=0000` success at 12:45:51.875.
-4. Only then send 18 (at 12:45:51.951 in that capture), immediately queue
-   `SET_SYSTEM_TIME` (48) and the normal device-initialization commands, and
-   keep the connection alive. The watch first reported bound at 12:45:57.827.
+### Request and confirm: commands 113 and 115
 
-The backend response logged by the app is `code=0000, data=null`; there is
-no evidence that it returns a distinct value which is then sent to the watch.
-Whether the backend registration itself, the initialization queue, connection
-timing, or the watch confirmation caused the final commit remains unisolated.
-Our 2026-08-31 Linux experiment sent the exact 17/18 frames without step 3
-or the post-bind queue. Command 18 still returned its generic success ACK,
-but 16 stayed false and 19 stayed unverified after the watch's confirmation
-prompt reported pairing failure. Thus an ACK for 18 is transport acceptance,
-not evidence that the bind committed. No CLI command exposes these encoders;
-they must not be used for probing.
+Both use:
 
-### Binding experiments that did **not** commit (2026-08-31)
-
-The following are negative results, recorded explicitly so that none becomes
-an assumed prerequisite in a later implementation.  In every case the watch
-returned the generic success ACK `08 12 a0 06 00` for command 18, but then
-returned `request_binding_status: false` for 16 and
-`verify_result_type: false, binding_status: false` for 19.
-
-| Candidate explanation | What was reproduced | Result / conclusion |
-| --- | --- | --- |
-| Missing Linux BLE bond or trust | The watch was locally `Paired: yes`, `Bonded: yes`, and `Trusted: yes`. | **Not sufficient.** A local bond/trust flag does not make the app bind commit. |
-| Missing requested LE encryption | Two HCI-captured trials separated gatttool's command-line policy from actual controller state. Merely starting it with `-l medium` left the application connection unencrypted; BlueZ reused the LTK only on its automatic reconnect after gatttool exited. In the decisive trial, interactive `sec-level medium` was issued on the connected socket. `LE Start Encryption` used the stored LTK and `Encryption Change` enabled AES-CCM at capture time 481.219; the first command 16 write followed at 481.897. Exact 17/18 + 48/65/49/164, 16/19, and 179 traffic therefore crossed that encrypted handle. | **Rejected as the missing gate.** Command 18 still acked success, but command 16 remained false and 19 remained unverified/unbound. Link encryption alone does not commit the app bind. |
-| Missing post-bind setup commands alone | Exact 17 and 18 requests, then commands 48 (time), 65 (language list), 49 (time format), and 164 (realtime), all acknowledged, but without the successful command-0/ATT-MTU setup described below. | **Not sufficient by itself.** The familiar post-bind initialization sequence does not replace the SDK/ATT MTU setup. |
-| Missing vendor registration | The authenticated official-app backend request `POST /zh_watch/infowear/device/bind` was reproduced using the app's encrypted `{data: ...}` envelope. A subsequent request returned code `1000` (duplicate device binding). | **Not sufficient.** Server registration exists, but no separate server value has been observed going to the watch. |
-| Missing HFP phone service | A local HFP Audio Gateway completed the watch's full observed setup: `BRSF`, `CIND=?`, `CIND?`, `CMER`, `COPS`, `CMEE`, `BTRH`, `CLIP`, `CCWA`, `CGMI`, `CGMM`, `NREC`, `CCLK`, `VGS`, and `CSCS`. Every request received a syntactically correct successful response. | **Not sufficient.** HFP is operational, but it did not promote 16/19 to a bound/verified state. |
-| The visible `K: K` notification banner means a phone is globally bound | The same banner appeared while the phone itself was unbound. | **Rejected as an interpretation.** It is not evidence of a successful app bind or of which host the watch accepts. |
-| Notification content requires only an encrypted LE socket | After the HCI-confirmed AES-CCM transition above, command 179 was sent on the same encrypted handle and returned status 0. After fixing the transport to raise security on the connected socket, a separate command 179 (`Gmail`, title `Encrypted retry`, body `Notification after verified AES-CCM transport fix`) again returned `08 b3 01 a0 06 00`; the user observed the unchanged `K: K` banner of type Messenger. | **Rejected.** Link encryption does not make an unbound Linux peer's notification content authoritative. The successful Android bind used `BOND_NONE`, so an Android LE bond is not the missing notification prerequisite either. |
-
-The HFP mock is useful diagnostic infrastructure, not a proof that classic
-HFP is irrelevant: the full Android reference still has an authenticated,
-encrypted BR/EDR link.  What is now ruled out is the narrower hypothesis that
-the missing *AT-command application service alone* explains pairing failure.
-The narrower "Linux did not encrypt" hypothesis is now rejected. An earlier
-working hypothesis was that the watch retained state associated with the
-Android host's bond. Re-reading the successful bind log rejects that as a
-prerequisite: when Android opened the successful GATT connection at
-12:45:42.043 it logged `BondState:10` (`BluetoothDevice.BOND_NONE`), and it
-still logged `checkBondByMac:false` after binding. Bluetooth also identifies
-a bonded *host*, not which Android application is using the host stack.
-
-The Linux replay was therefore not strict at the full-session level even
-though commands 17 and 18 were byte-identical. Differences still present in
-the successful Android transaction are:
-
-1. Android enabled notifications on all five `6f01` through `6f05`
-   characteristics; the Linux transport enabled only `6f01` through `6f03`.
-2. Before command 16, Android sent protocol command 0
-   (`08 00 9a 06 09 08 f7 01 10 0c 18 0c 20 00`) and received
-   `08 00 10 f7 01`. This negotiates the SDK transport MTU/chunk settings and
-   is separate from the ATT MTU exchange. Linux omitted it.
-3. After commands 18/48/65/49/164 but before the first bound=true command 16,
-   the watch spontaneously sent command 27:
-   `08 1b 1a 19 42 17 08 01 10 01 1a 11 "D6:45:15:30:04:71"`.
-   This is `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` reporting two true
-   flags plus the watch MAC. The app transport acknowledged it; it did not
-   send a protobuf response. Linux's failed replay never observed this event.
-
-Command 27 is currently the strongest discriminating event. It can be a
-cause of the bind commit or a correlated report of the same internal state;
-the existing trace alone cannot distinguish those. Either way, a genuinely
-strict reproduction must negotiate command 0, subscribe to all five
-channels, reproduce the classic-link transition that makes the watch emit
-27, wait for that event, and only then query command 16.
-
-### Successful Linux application bind (2026-08-31)
-
-The full-session replay subsequently succeeded. Two consecutive trials
-isolate the SDK/ATT MTU relationship:
-
-1. With all five notifications enabled and the exact command 0 request sent,
-   but gatttool's default ATT MTU 23, the watch replied `08 00 10 17` (23).
-   It never emitted command 27; command 16 remained false and command 19
-   returned false/unbound.
-2. The transport then explicitly completed ATT Exchange MTU at 247 before
-   enabling the channels. The identical command 0 request now received the
-   reference reply `08 00 10 f7 01` (247). The remaining application sequence
-   was identical: 16(false), 17, 18, 48, 65, 49, and 164.
-
-After the second sequence the watch spontaneously emitted:
-
-```
-08 1b 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
+```text
+{1:command_id, 9:{1:{1:time, 2:function_type}}}
 ```
 
-This command 27 has its first status flag false and second flag true, unlike
-the Android reference's two true flags, so byte equality of that spontaneous
-event is not required. Immediately afterward command 16 returned
-`08 10 1a 02 08 01` (bound), and command 19 returned
-`08 13 1a 06 3a 04 08 01 10 01` (verified and bound). The Linux application
-bind therefore committed successfully.
+Command 113 returns a function-specific bean. Command 115 confirms successful
+processing and receives generic success.
 
-The only intentional change between the adjacent failed and successful
-trials was ATT MTU 247, reflected by command 0's reply. This makes the
-ATT-MTU/SDK-MTU agreement the strongest demonstrated commit prerequisite,
-while command 27 is an observable completion event rather than something the
-host should forge. `protocol.encode_mtu_request_change()` reproduces command
-0, and `GatttoolSession(..., att_mtu=247)` performs the required ATT exchange.
+| Function type | Response field inside field 9 | Parser |
+| ---: | ---: | --- |
+| 0 | 4 | `parse_daily_data` |
+| 1 | 5 | `parse_sleep_data` |
+| 2 | 6 | `parse_continuous_heart_rate` |
+| 11 | 14 | `parse_effective_standing` |
+| 12 | 15 | `parse_activity_duration` |
 
-The watch visibly displayed **"Pairing successful"** when this sequence
-committed. A subsequent command 179 (`Gmail`, title `Binding succeeded`, body
-`Full MTU 247 bind replay is now verified`) returned status 0 and displayed
-the complete title and body correctly. This replaces the previous `K: K`
-fallback and demonstrates end to end that the missing prerequisite was the
-MTU negotiation, not notification encoding, BLE encryption, Android bond
-identity, backend response data, or HFP AT-command emulation.
+### Daily data
 
-Classic/HFP was then removed as a notification prerequisite: the local HFP
-Audio Gateway was stopped, all existing Bluetooth links were disconnected,
-and a fresh BLE-only session negotiated ATT MTU 247. Command 179 (`Gmail`,
-title `BLE only notification`, body `HFP gateway is stopped; this arrived
-over BLE alone`) returned status 0 and the user confirmed that all text
-displayed correctly. Thus Classic Bluetooth participates in the watch's call
-feature and reports status through commands 25/27, but no Classic or HFP link
-is required to deliver notifications after the application bind has
-committed.
-
-An encrypted post-bind notification was also attempted as a separate
-experiment. Twice, a session connected with ATT MTU 247, enabled all five
-CCCDs, and requested `sec-level medium`, but the watch did not return the
-chunked transport's ready-ACK for command 179; each attempt timed out before
-the protobuf was accepted. After disconnecting and reconnecting at
-`sec-level low`, an otherwise equivalent `Low-security control` notification
-immediately returned `08 b3 01 a0 06 00`. Therefore the failure is specific
-to the post-bind medium-security session, not loss of the application bind or
-general BLE availability. Without an HCI capture it is not yet known whether
-AES-CCM actually enabled, the stored LTK was rejected or replaced during the
-successful bind/pair transition, or the watch deliberately stopped the SDK
-transport after encryption. Do not describe this trial as a successfully
-delivered encrypted notification.
-
-### Testing lower-layer pairing identity
-
-Treat this as a trace-comparison experiment, not as a change to the protobuf
-messages.  Capture one **known-good Android bind** and one Linux failed bind
-from reset through the first post-bind status query, then compare these HCI
-events by connection handle and time:
-
-| Layer | Evidence in a good trace | What to compare against Linux |
-| --- | --- | --- |
-| LE peer identity | `LE Connection Complete` peer address/type; if a private address is used, controller resolving-list/identity information rather than only the over-air address. | Same peer address type and whether the controller treats it as an already-known identity. An advertising address alone is not a bond identity. |
-| LE bond use | `LE Long Term Key Request` followed by the host's positive LTK reply, then `Encryption Change enabled=1`. On first pairing, SMP `Pairing Request/Response`, Public Key, Random, and DHKey Check establish the Secure-Connections bond. | Whether Linux gets an LTK request and answers it successfully; a fresh SMP pairing is different evidence from reuse of an existing stored LTK. Record the `RAND`/`EDIV` selectors and key-size/authentication flags, but never publish key material. |
-| BR/EDR bond use | `Link Key Request` / positive link-key reply on reconnect, then `Authentication Complete` and `Encryption Change enabled=1`. A first-time classic pairing instead shows SSP IO-capability/user-confirmation and a `Link Key Notification`. | Whether BlueZ has and uses a classic link key for this controller/watch pair, rather than merely accepting an RFCOMM connection temporarily. |
-| Cross-transport derivation | If the controller derives a BR/EDR key from the LE bond (or vice versa), the chronological relationship of LE pairing, key notification, and the first classic authentication shows it. | Check whether the Linux LE and BR/EDR bonds are independently created/reused in the same way as Android's; do not infer CTKD merely from both links being connected. |
-
-Practical capture method on Linux: run `btmon -w linux-bind.snoop` *before*
-starting the bind and leave it running until after commands 16 and 19.  The
-Android `btsnoop_hci.log` reference is compared with Wireshark/tshark by HCI
-handle; do not compare packet numbers because the two controllers will order
-unrelated traffic differently.  Useful display filters are
-`bthci_evt.le_meta_subevent == 0x01` (LE connection complete),
-`bthci_evt.le_meta_subevent == 0x05` (LE LTK request), `btsmp`,
-`bthci_evt.code == 0x08` (encryption change), and classic
-`bthci_evt.code == 0x17` (link-key request).  Field names vary slightly by
-Wireshark release, so the event names are the durable reference.
-
-Other Android captures establish that the watch is capable of LE Secure
-Connections and encrypted classic HFP, but the successful bind discussed
-above started with Android reporting `BOND_NONE`. Consequently key equality
-is not the priority explanation for the bind commit. The higher-value trace
-comparison is the complete bidirectional application sequence and classic
-state chronology, especially command 0 and the watch-originated command 27.
-
-### Linux bond-identity result (2026-08-31)
-
-The privileged Linux capture closes several of the checks above:
-
-- LE connected with the watch's public address on handle 3585. There was no
-  SMP exchange and no newly generated key. The host issued `LE Start
-  Encryption` with its stored LTK (`RAND=0`, `EDIV=0`, the Secure Connections
-  selectors), and the controller reported `Encryption: Enabled with AES-CCM`.
-- Encryption completed before the first protocol request. Commands 16, 17,
-  18, 48, 65, 49, 164, 19, and 179 all used that same encrypted handle.
-- Classic BR/EDR independently received `Link Key Request`; Linux supplied
-  its stored link key, encryption enabled with a 16-byte key, and the HFP
-  service exchange proceeded.
-- Despite both stored keys being accepted and both transports being
-  encrypted, command 16 remained false and command 19 returned
-  `verify_result_type:false, binding_status:false` after command 18.
-
-Therefore Linux is not presenting an ephemeral unbonded peer, and the watch
-is not rejecting Linux's keys at the controller layer. But this does not
-explain the successful Android bind, which did not require an Android LE bond.
-The priority is now the missing full-session events above, especially the
-watch-originated command 27, rather than equality of Android and Linux keys.
-
-## Unbinding: `UNBIND_REQUEST` (23)
-
-Captured live from the official Android app at 2026-08-31 20:53:17 while
-the user selected its unbind action. The protocol-level request is simply:
-
-```
--> 08 17                    # {1: 23}
-<- 08 17 a0 06 00           # {1: 23, 100: 0} (success)
+```text
+{
+  1: selector echo,
+  2: steps_frequency_minutes,
+  3: steps_raw,
+  4: distance_frequency_minutes,
+  5: distance_raw,
+  6: calorie_frequency_minutes,
+  7: calorie_raw
+}
 ```
 
-`protocol.encode_unbind_request()` produces the request. This is **not** a
-connection-management command: it clears the watch's app binding and is
-destructive/requires re-binding. Do not send it merely to disconnect or to
-test a link.
+Each raw array contains big-endian unsigned 16-bit buckets. With a frequency
+of 60 minutes, each array contains 24 buckets. Distance is in metres.
 
-The Android app then performs a separate sequence: it finishes in-flight
-fitness sync, disconnects the classic link (remote termination at
-20:53:18.626), disconnects the LE GATT link (phone-local termination at
-20:53:19.147), and invokes Android's Bluetooth unpair operation. Its own
-log reports the phone bond as `BondState:12` immediately beforehand and
-`Unpair a Bluetooth device returnValue = true` afterward. Thus command 23
-alone is observed to clear the protocol binding; removing the phone's LE
-and classic bonds is a distinct host-side operation.
+### Continuous heart rate
 
-## Classic-Bluetooth status: `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` (25) and `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` (27)
-
-Both carry `SEBindAccount.classicBluetoothStatus` (field 8), an
-`SEClassicBluetoothStatus`, whose field numbers come from the decompiled
-`BindAccountProtos$SEClassicBluetoothStatus`:
-
-| # | Field | Type |
-| --- | --- | --- |
-| 1 | `inquiryClassicBluetoothConnectStatus` | bool |
-| 2 | `inquiryClassicBluetoothSwitch` | bool |
-| 3 | `inquiryClassicBluetoothMac` | string — **the watch's own** classic MAC |
-
-25 is the central's query; 27 is the watch pushing the same payload
-unprompted. Live, 2026-08-31, BLE-only from this tool:
-
-```
--> 08 19
-<- 08 19 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
-   = {1: 25, 3: {8: {1: 0, 2: 1, 3: "D6:45:15:30:04:71"}}}
+```text
+{
+  1: selector echo,
+  2: frequency_minutes,
+  3: heart_rate_raw,
+  4: max_value,
+  5: min_value,
+  6: resting_value,
+  7: hour_max_raw,
+  8: hour_min_raw
+}
 ```
 
-i.e. **classic radio switched on, nothing connected to it**, plus the
-address to connect to — byte-for-byte the same status the watch pushes as
-27. So the watch tracks, and volunteers, whether it currently has a classic
-link, and this tool has never given it one.
+Heart-rate buckets are one unsigned byte each. A zero bucket means no sample.
+The bucket count must equal `1440 / frequency_minutes`.
 
-Field 1 is confirmed to toggle: the 2026-08-31 capture
-(`scratch/notif-capture/BLE_2026-08-31.b.zh`) contains exactly two
-watch-pushed 27s, differing in that byte alone —
+### Sleep
 
-```
-06:25:54.070  08 1B 1A 19 42 17 08 00 10 01 1A 11 <mac>   connect_status: false
-06:28:11.089  08 1B 1A 19 42 17 08 01 10 01 1A 11 <mac>   connect_status: true
-```
-
-— the `false` one 1.7s after `Pairing failed device = ... BondState:10`,
-the `true` one once pairing had succeeded. It stays true for the rest of
-the session, and the 179 that displayed went out at 07:39:21, 71 minutes
-inside that window.
-
-### What the HCI snoop shows at the moment the notification displayed
-
-`scratch/notif-capture/btsnoop2.log` covers 06:27:49–07:39:59 and contains
-two ACL handles to the watch: **`0x0008`, classic BR/EDR** (`Connect
-Complete`, `BD_ADDR d6:45:15:30:04:71`, `Link Type: ACL`, t=19.766) and
-**`0x0004`, LE**. There is **no `Disconnect Complete` anywhere in the
-capture**, so the classic link stayed up throughout.
-
-The 179 that displayed is frame 4100 at 07:39:21.890 (t=4292.76): an ATT
-`Write Command` to handle `0x0024` on **`0x0004` — the LE link**. Meanwhile
-the last classic traffic of any kind (an RFCOMM/HFP frame) is at t=3075.0.
-
-```
-t=  19.766  classic ACL 0x0008 up ....................... never torn down
-t=3075.000  last classic packet (RFCOMM/HFP)
-t=4292.758  the 179 that displayed  -> LE handle 0x0004
-            ................. 1218 s of classic silence .................
+```text
+{
+  1: selector echo,
+  2: start_sleep_timestamp,
+  3: end_sleep_timestamp,
+  4: sleep_duration,
+  5: sleep_score,
+  6: awake_time,
+  7: awake_percentage,
+  8: light_sleep_time,
+  9: light_sleep_percentage,
+  10: deep_sleep_time,
+  11: deep_sleep_percentage,
+  12: rem_time,
+  13: rem_percentage,
+  14:{1:[stage, ...]},
+  15: sleep_type,
+  16: sleep_readiness_score
+}
 ```
 
-So at the moment of display the classic link was **present but completely
-idle for ~20 minutes**, and the notification's bytes crossed BLE alone.
-Display therefore does not require the notification to travel over the
-classic link, nor any classic activity at the time — only that the link
-*exist*. That also narrows what a Linux host would have to reproduce: a
-bare classic ACL connection, not the HFP profile that `TODO.md` item 4
-found `bluetoothd` refusing.
+Stage entries are `{1:start_timestamp, 2:duration_minutes, 3:stage_type}`.
+Stage types are 0 awake, 1 light, 2 deep, and 3 REM. The final zero-duration
+awake entry marks wake-up. Sleep type 1 is night sleep; 0 is daytime sleep.
 
-That makes 25 a direct read-out of the variable the standing
-notification-display hypothesis is about (see `TODO.md`): every 179 that
-acked without displaying was sent while this query returns
-`connect_status: false`, and the one 179 known to have displayed was sent
-with it true. Correlation only — not yet a demonstrated cause, and
-untestable from this host alone, since flipping it requires a phone to
-bring the classic link up.
+### Effective standing
 
-## Link security: no application-layer crypto; encryption is the peer's choice
+```text
+{1:selector echo, 2:frequency_minutes, 3:raw}
+```
 
-There is **no application-layer cryptography anywhere in this protocol**: no
-secret key, no nonce exchange, no HMAC, no AES-CCM. Every payload documented
-above is plain protobuf. Confidentiality, if any, comes entirely from BLE
-link-layer encryption, which is a property of the *peer*, not of the watch's
-protocol:
+The raw value contains one byte per bucket.
 
-- **This repo's Linux client**: connects and exchanges the full protobuf
-  protocol — reads fitness data, writes notifications — with **no pairing
-  and no encryption at all**. The watch does not require an encrypted link
-  for the `1618` service's characteristics.
-- **The official Android app** (`btsnoop`, 2026-08-31 06:28): pairs with
-  **LE Secure Connections** (`Pairing Public Key` / `DHKey Check` exchange,
-  i.e. ECDH P-256, max key size 16) and the LE link is then encrypted —
-  `HCI Encryption Change status=0 enabled=1` on the LE ACL handle, 12
-  seconds before the first protobuf byte. The classic HFP link is encrypted
-  too (`Authentication Complete`, then `Encryption Change` on the BR/EDR
-  handle).
+### Activity duration
 
-  The association model is **Just Works**, and therefore unauthenticated:
-  initiator IO capability `0x04` (KeyboardDisplay), responder `0x03`
-  (NoInputNoOutput), and the responder clears the MITM bit in its AuthReq
-  (`0x29`; the initiator sets it, `0x2d`). Both sides set the SC bit.
+Fields 1 through 5 contain selector echo, frequency, raw buckets, daily time,
+and daily percentage. Fields 6 through 31 are time/percentage pairs for the
+sport categories defined by the SDK.
 
-  There is also a short unencrypted window at the start of each connection —
-  ATT traffic begins ~12 s before `Encryption Change` — but in the capture it
-  carries only GATT discovery, no protocol payload.
+## Real-time data
 
-An earlier revision of this section claimed "zero SMP packets ... unpaired
-and unencrypted throughout", generalising from the 2026-08-29 capture. That
-is **retracted**: it was true of that session's link state, not of the
-protocol. Note also that an Android `btsnoop_hci.log` records HCI traffic,
-which is *above* the controller's link-layer encryption — plaintext in a
-snoop log is never evidence of plaintext over the air.
+Command 164 enables or disables reports:
 
-## What isn't known yet
+```text
+{1:164, 12:{3:<0-or-1>}}
+```
 
-- Characteristics `6f04`, `6f05` — present in the GATT table, never seen
-  carrying traffic in either capture. `DATA_UPLOAD`'s name in `protocol.py`
-  is a guess based on position, not a confirmed role (`6f03`'s neighboring
-  guess, `ACTIVITY_DATA`, turned out to be accurate -- see "Workout data"
-  above -- so `6f04`/`6f05` guesses are at least plausible, not baseless).
-- `RealTimeData`'s hourly arrays — every captured example has been all-zero,
-  so their per-bucket width and byte order are still unchecked.
-  `DailyData`'s (2-byte big-endian) and `ContinuousHeartRate`'s (1-byte)
-  arrays are both settled against non-zero captures, see "Fitness data".
-- The calorie unit in `DailyData` (kcal is the obvious guess, unverified).
-- `SleepData` field 16 (`sleep_readiness_score`, a float in the app's class)
-  and the `DAYTIME_SLEEP` sleep type — never sent by this model so far.
-- `RealTimeData` fields 8, 9, and 13 (varints, always 0 so far) and field 10
-  (a physiologicalCycle submessage, not parsed) — present but unidentified.
-- Command ids other than the ones documented above have request encodings
-  that follow the same `08 <varint id>` pattern but undecoded response
-  schemas (see the command id table).
-- Chunking behavior for a payload spanning more than one data chunk (every
-  capture so far fit in a single chunk) — the split points, and whether
-  there's a negotiated MTU step before chunk size matters, are unconfirmed.
-- Whether any command exists that performs a destructive write (e.g.
-  factory reset, firmware update) — not investigated, and out of scope for
-  this read-mostly tool regardless.
-- ~~`ControlBleTools.sendAppNotification(...)`~~ — traced and implemented
-  2026-08-30 as `SEND_APP_NOTIFICATION` (179), see "App push notification"
-  above.
-- The "Berry" protocol branch (`ControlBleTools.isBerryProtocol(...)`,
-  `com.zhapp.ble.a$a`, classes like `WearSocketMessageData`) — a sibling
-  code path in the same SDK for other watch models. Not relevant to this
-  watch (confirmed "Apricot" via a live log line: `protocol = Apricot`
-  during connect), not investigated further.
+`protocol.encode_real_time_data_switch_request()` builds the request. The
+watch pushes command 165 with steps, calories, distance, heart rate, battery
+state, and other current fields. `protocol.parse_real_time_data()` decodes
+the supported fields.
+
+## Workout data
+
+Workout transfer uses commands 117, 119, and 121.
+
+### Entry list: command 117
+
+Request: `08 75`.
+
+The response contains opaque entry identifiers. The low two bits of the last
+identifier byte select the component:
+
+| Value | Component |
+| ---: | --- |
+| 0 | Point/sample data |
+| 1 | Workout report |
+| 2 | GPS data |
+
+### Fetch data: command 119
+
+```text
+{1:119, 9:{3:<concatenated entry identifiers>}}
+```
+
+Bulk data may arrive on `6f03` or `6f01` in multiple chunked rounds. The
+transport has no explicit end marker. Collect rounds until a grace interval
+expires, concatenate their payloads, then split the result using identifiers
+and component headers.
+
+### Confirm list: command 121
+
+Command 121 uses the same selector shape as command 119. Send it only after
+every requested component has been received and parsed successfully.
+
+### Components
+
+- The report component is decoded by `protocol.parse_workout_report()` and
+  contains sport type, start/end time, duration, calories, distance, steps,
+  heart-rate summaries, training effect, recovery time, cadence, speed, and
+  stride-related fields.
+- The GPS component contains fixed-width points with timestamp, latitude,
+  and longitude. Coordinates are signed integers scaled by `1e7`.
+  `protocol.parse_gps_points()` performs the conversion.
+- The point/sample component header is recognized, but its sample payload
+  schema is unknown.
+
+## Screen settings
+
+Command 247 returns:
+
+```text
+{
+  15:{
+    14:{
+      1:brightness_level,
+      2:normally_on_switch,
+      3:on_screen_duration,
+      4:double_click_highlighted_screen
+    }
+  }
+}
+```
+
+Command 249 is a watch-originated request to refresh screen settings.
+
+## Link security
+
+The Apricot protocol has no application-layer encryption, nonce, MAC, or
+signature. Messages are plain protobuf inside the chunked transport.
+
+The GATT characteristics accept an unencrypted LE connection. BLE link-layer
+encryption may be enabled independently when the peers have a usable bond; it
+does not change protobuf or chunk framing. Application binding and
+notification delivery do not require BLE encryption, Classic Bluetooth, or
+HFP.
+
+## Unknown fields and commands
+
+- The roles of characteristics `6f04` and `6f05` are unknown.
+- The calorie unit in daily fitness data is unknown.
+- Several real-time report fields and hourly arrays are not decoded.
+- The workout point/sample component is not decoded.
+- Commands not described above may use the same outer command envelope but
+  have unknown schemas.
+- The Berry protocol used by other watch models is outside this document.
