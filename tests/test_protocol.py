@@ -31,6 +31,21 @@ DAILY_PAYLOAD = bytes.fromhex(
 )
 
 
+# function_type 2, day of 2026-08-31: a single 60 bpm reading at 05:20.
+HEART_RATE_PAYLOAD = bytes.fromhex(
+    "08714af50232f2020a110a0d08ea0f1008181f200028003000100210051aa00200000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000003c0000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000203c283c30003a180000000000000000000000000000000000000000000000"
+    "004218000000000000000000000000000000000000000000000000"
+)
+
+
 def test_parse_sleep_data_matches_the_app_decode() -> None:
     sleep = protocol.parse_sleep_data(SLEEP_PAYLOAD)
     assert sleep.start_timestamp == 1788125940
@@ -62,3 +77,20 @@ def test_parse_daily_data_buckets_are_big_endian() -> None:
     assert daily.steps == [0] * 21 + [29, 0, 95]
     assert daily.distance == [0] * 21 + [23, 0, 77]
     assert daily.calories == [0] * 23 + [2]
+
+
+def test_parse_daily_data_totals_and_bucket_times() -> None:
+    daily = protocol.parse_daily_data(DAILY_PAYLOAD)
+    assert (daily.total_steps, daily.total_distance, daily.total_calories) == (124, 100, 2)
+    assert len(daily.steps) == 24
+    assert daily.bucket_start_minutes()[21] == 21 * 60
+
+
+def test_parse_continuous_heart_rate_is_one_byte_per_bucket() -> None:
+    heart_rate = protocol.parse_continuous_heart_rate(HEART_RATE_PAYLOAD)
+    assert heart_rate.frequency_minutes == 5
+    assert len(heart_rate.heart_rate) == 288  # 1440 / 5
+    # The app logged heartRateData[64] == 60 for these same bytes: 05:20.
+    assert [(index, value) for index, value in enumerate(heart_rate.heart_rate) if value] == [(64, 60)]
+    assert (heart_rate.max_value, heart_rate.min_value) == (60, 60)
+    assert (len(heart_rate.hour_max), len(heart_rate.hour_min)) == (24, 24)

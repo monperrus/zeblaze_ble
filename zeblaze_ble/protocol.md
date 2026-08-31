@@ -275,15 +275,20 @@ Bean field layouts (all verified against real payloads, see
   was 48 bytes = **2 bytes per bucket, big-endian unsigned**. Byte order is
   confirmed by a non-zero capture: a day whose 21:00 and 23:00 hours held 29
   and 95 steps encoded those buckets as `00 1d` and `00 5f`, matching the
-  app's own decode of the same bytes. `protocol.unpack_buckets` /
-  `DailyData.steps`/`.distance`/`.calories` do that decode. The app's
-  protobuf class declares further fields (8: HBA data, 9..15: today-only
-  step/calorie variants) that this model has never sent.
+  app's own decode of the same bytes. `protocol.unpack_buckets` does that
+  decode; `DailyData` carries both the raw bytes and the decoded
+  `steps`/`distance`/`calories` lists. Distance is metres (the app stores a
+  3 km goal as `3000`, and live pushes report ~0.8 m per step); the calorie
+  unit is unconfirmed. The app's protobuf class declares further fields
+  (8: HBA data, 9..15: today-only step/calorie variants) that this model has
+  never sent.
 - **`ContinuousHeartRate`**: `{1: echo, 2: frequency_minutes (5 observed,
-  giving 288 buckets/day), 3: heart_rate_raw (1 byte/bucket — a heart rate
-  fits in a byte, so this one's width is not in question, just still
-  unconfirmed against non-zero data), 4: max_value, 5: min_value,
+  giving 288 buckets/day), 3: heart_rate_raw, 4: max_value, 5: min_value,
   6: resting_value, 7: hour_max_raw (24 bytes), 8: hour_min_raw (24 bytes)}`.
+  **1 byte per bucket**, confirmed against a non-zero capture: a day whose
+  only reading was 60 bpm at 05:20 had byte 64 of the 288-byte array set to
+  60, matching the app's decode. A zero bucket means "no sample taken", not
+  a measured zero — the hour arrays were all-zero even on that day.
 - **`SleepData`** (function_type 1): `{1: echo, 2: start_sleep_timestamp,
   3: end_sleep_timestamp, 4: sleep_duration, 5: sleep_score,
   6: awake_time, 7: awake_time_percentage, 8: light_sleep_time,
@@ -707,10 +712,11 @@ AES-CCM anywhere.
   is a guess based on position, not a confirmed role (`6f03`'s neighboring
   guess, `ACTIVITY_DATA`, turned out to be accurate -- see "Workout data"
   above -- so `6f04`/`6f05` guesses are at least plausible, not baseless).
-- Byte order and signedness inside the packed 2-byte array fields other than
-  `DailyData`'s (`ContinuousHeartRate`'s hour arrays, `RealTimeData`'s
-  hourly arrays) — every captured example of those has been all-zero so far.
-  `DailyData`'s own arrays are settled (big-endian, see "Fitness data").
+- `RealTimeData`'s hourly arrays — every captured example has been all-zero,
+  so their per-bucket width and byte order are still unchecked.
+  `DailyData`'s (2-byte big-endian) and `ContinuousHeartRate`'s (1-byte)
+  arrays are both settled against non-zero captures, see "Fitness data".
+- The calorie unit in `DailyData` (kcal is the obvious guess, unverified).
 - `SleepData` field 16 (`sleep_readiness_score`, a float in the app's class)
   and the `DAYTIME_SLEEP` sleep type — never sent by this model so far.
 - `RealTimeData` fields 8, 9, and 13 (varints, always 0 so far) and field 10

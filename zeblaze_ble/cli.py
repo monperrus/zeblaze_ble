@@ -119,6 +119,17 @@ def parser() -> argparse.ArgumentParser:
     app_notify_command.add_argument("--page", default="", help="pageName (unused by the app for third-party notifications)")
     app_notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
     app_notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    daily_command = commands.add_parser(
+        "daily",
+        help="fetch every currently-available day of steps/distance/calories (performs protocol writes)",
+    )
+    daily_command.add_argument("address")
+    daily_command.add_argument(
+        "--buckets",
+        action="store_true",
+        help="also print the per-bucket (hourly) arrays, not just the day totals",
+    )
+    daily_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     sleep_command = commands.add_parser(
         "sleep",
         help="fetch every currently-available night of sleep data (performs protocol writes)",
@@ -180,6 +191,27 @@ async def run(arguments: argparse.Namespace) -> int:
                 indent=2,
             )
         )
+        return 0
+
+    if arguments.command == "daily":
+        results = await request_fitness_data(arguments.address, (protocol.FITNESS_TYPE_DAILY,))
+        days = []
+        for entry, data in results:
+            day: dict[str, object] = {"date": f"{entry.year:04d}-{entry.month:02d}-{entry.day:02d}"}
+            if not isinstance(data, protocol.DailyData):
+                day["data"] = _jsonable(data)
+                days.append(day)
+                continue
+            day["total_steps"] = data.total_steps
+            day["total_distance_metres"] = data.total_distance
+            day["total_calories"] = data.total_calories
+            day["bucket_minutes"] = data.steps_frequency_minutes
+            if arguments.buckets:
+                day["steps"] = data.steps
+                day["distance"] = data.distance
+                day["calories"] = data.calories
+            days.append(day)
+        print(json.dumps(days, indent=2))
         return 0
 
     if arguments.command == "sleep":

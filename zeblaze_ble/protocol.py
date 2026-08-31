@@ -476,9 +476,14 @@ def unpack_buckets(raw: bytes) -> list[int]:
 class DailyData:
     """Steps/distance/calories, in `frequency`-minute buckets across the requested day.
 
-    The three `*_raw` arrays are 2 bytes per bucket, big-endian unsigned
-    (bucket count matches 1440/frequency); the decoded `steps`, `distance`
-    and `calories` lists are the same values via `unpack_buckets`.
+    `steps`/`distance`/`calories` are the decoded buckets (the `*_raw`
+    arrays are kept alongside them so nothing is lost to a decode bug):
+    2 bytes per bucket, big-endian unsigned, `1440 / frequency` of them, so
+    the usual 60-minute frequency gives 24 buckets starting at local
+    midnight. `bucket_start_minutes` gives each bucket's offset into the day.
+
+    Distance is metres (the app's own 3 km goal is stored as `3000`, and
+    live pushes report ~0.8 m per step); the calorie unit is unconfirmed.
     """
 
     steps_frequency_minutes: int
@@ -487,29 +492,43 @@ class DailyData:
     distance_raw: bytes
     calorie_frequency_minutes: int
     calorie_raw: bytes
+    steps: list[int]
+    distance: list[int]
+    calories: list[int]
 
     @property
-    def steps(self) -> list[int]:
-        return unpack_buckets(self.steps_raw)
+    def total_steps(self) -> int:
+        return sum(self.steps)
 
     @property
-    def distance(self) -> list[int]:
-        return unpack_buckets(self.distance_raw)
+    def total_distance(self) -> int:
+        return sum(self.distance)
 
     @property
-    def calories(self) -> list[int]:
-        return unpack_buckets(self.calorie_raw)
+    def total_calories(self) -> int:
+        return sum(self.calories)
+
+    def bucket_start_minutes(self, frequency_minutes: int | None = None) -> list[int]:
+        """Minutes past local midnight at which each bucket starts."""
+        frequency = frequency_minutes or self.steps_frequency_minutes
+        return [index * frequency for index in range(len(self.steps))]
 
 
 def parse_daily_data(payload: bytes) -> DailyData:
     bean = decode_protobuf(_fitness_bean_bytes(payload, FITNESS_TYPE_DAILY))
+    steps_raw = _bytes_field(bean, 3)
+    distance_raw = _bytes_field(bean, 5)
+    calorie_raw = _bytes_field(bean, 7)
     return DailyData(
         steps_frequency_minutes=_int_field(bean, 2),
-        steps_raw=_bytes_field(bean, 3),
+        steps_raw=steps_raw,
         distance_frequency_minutes=_int_field(bean, 4),
-        distance_raw=_bytes_field(bean, 5),
+        distance_raw=distance_raw,
         calorie_frequency_minutes=_int_field(bean, 6),
-        calorie_raw=_bytes_field(bean, 7),
+        calorie_raw=calorie_raw,
+        steps=unpack_buckets(steps_raw),
+        distance=unpack_buckets(distance_raw),
+        calories=unpack_buckets(calorie_raw),
     )
 
 
@@ -597,11 +616,13 @@ def parse_sleep_data(payload: bytes) -> SleepData:
 
 @dataclass(frozen=True)
 class ContinuousHeartRate:
-    """Same raw-bytes caveat as `DailyData` applies to the *_raw fields here.
+    """Heart rate sampled every `frequency_minutes` across the requested day.
 
-    `heart_rate_raw` is 1 byte per bucket though (a heart rate fits in a
-    byte, unlike steps/distance/calories), so that one is very likely a
-    plain unsigned byte array -- still unconfirmed against non-zero data.
+    Unlike `DailyData`, these arrays are 1 byte per bucket (a heart rate
+    fits in a byte), confirmed against a non-zero capture: a day whose only
+    reading was 60 bpm at 05:20 had byte 64 of a 288-byte array (5-minute
+    frequency) set to 60, matching the app's own decode. A zero bucket means
+    "no sample", not a measured zero.
     """
 
     frequency_minutes: int
@@ -611,18 +632,27 @@ class ContinuousHeartRate:
     resting_value: int
     hour_max_raw: bytes
     hour_min_raw: bytes
+    heart_rate: list[int]
+    hour_max: list[int]
+    hour_min: list[int]
 
 
 def parse_continuous_heart_rate(payload: bytes) -> ContinuousHeartRate:
     bean = decode_protobuf(_fitness_bean_bytes(payload, FITNESS_TYPE_CONTINUOUS_HEART_RATE))
+    heart_rate_raw = _bytes_field(bean, 3)
+    hour_max_raw = _bytes_field(bean, 7)
+    hour_min_raw = _bytes_field(bean, 8)
     return ContinuousHeartRate(
         frequency_minutes=_int_field(bean, 2),
-        heart_rate_raw=_bytes_field(bean, 3),
+        heart_rate_raw=heart_rate_raw,
         max_value=_int_field(bean, 4),
         min_value=_int_field(bean, 5),
         resting_value=_int_field(bean, 6),
-        hour_max_raw=_bytes_field(bean, 7),
-        hour_min_raw=_bytes_field(bean, 8),
+        hour_max_raw=hour_max_raw,
+        hour_min_raw=hour_min_raw,
+        heart_rate=list(heart_rate_raw),
+        hour_max=list(hour_max_raw),
+        hour_min=list(hour_min_raw),
     )
 
 

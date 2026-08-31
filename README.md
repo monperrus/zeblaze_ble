@@ -2,7 +2,7 @@
 
 Python package for the Zeblaze watches, developed from a Beyond 3 Pro. 
 
-Main features: `battery`, `fitness`, `sleep`, `realtime`, `heartrate`, `notify`, and `workout`
+Main features: `battery`, `fitness`, `daily`, `sleep`, `realtime`, `heartrate`, `notify`, and `workout`
 
 ## Install
 
@@ -104,6 +104,36 @@ are gated behind `--i-understand-this-writes` for the same reason as
 `battery`. Full protocol writeup, including exactly what fields mean and
 what's still unverified (e.g. no GPS/location command has been found yet):
 `zeblaze_ble/protocol.md`.
+
+### Daily steps, distance and calories
+
+```bash
+zeblaze-ble daily <ADDRESS> --i-understand-this-writes
+zeblaze-ble daily <ADDRESS> --buckets --i-understand-this-writes
+```
+
+Fetches the steps/distance/calories buckets, one entry per day the watch
+still has. By default it prints the day totals; `--buckets` adds the
+per-bucket arrays.
+
+```json
+[
+  {
+    "date": "2026-08-30",
+    "total_steps": 124,
+    "total_distance_metres": 100,
+    "total_calories": 2,
+    "bucket_minutes": 60
+  }
+]
+```
+
+Buckets run from local midnight at `bucket_minutes` each (60 in every
+capture so far, so 24 hourly buckets). Distance is metres; the calorie unit
+is unconfirmed. `DailyData` also exposes the raw bytes next to the decoded
+lists, and `ContinuousHeartRate` (via `fitness`) decodes the same way at one
+byte per bucket, every `frequency_minutes` — a zero there means no sample
+was taken, not a measured zero.
 
 ### Sleep
 
