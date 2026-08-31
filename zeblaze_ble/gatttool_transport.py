@@ -22,6 +22,10 @@ _WRITE_VALUE_HANDLE = 0x0024  # 16186f02 characteristic value
 _WRITE_CCCD_HANDLE = 0x0025
 _ACTIVITY_VALUE_HANDLE = 0x0027  # 16186f03 characteristic value -- bulk data (e.g. GPS tracks), see protocol.md
 _ACTIVITY_CCCD_HANDLE = 0x0028
+_DATA_UPLOAD_VALUE_HANDLE = 0x002A  # 16186f04 characteristic value
+_DATA_UPLOAD_CCCD_HANDLE = 0x002B
+_CHANNEL_6F05_VALUE_HANDLE = 0x002D
+_CHANNEL_6F05_CCCD_HANDLE = 0x002E
 
 _NOTIFICATION_RE = re.compile(r"Notification handle = 0x([0-9a-fA-F]+) value: ([0-9a-fA-F ]+)")
 _PROMPT_TIMEOUT_SECONDS = 15.0
@@ -62,10 +66,24 @@ async def _disconnect_local_bluez(address: str) -> None:
 
 
 class GatttoolSession:
-    """Owns one interactive `gatttool -I` subprocess and its notification stream."""
+    """Own one interactive ``gatttool -I`` process and notification stream.
 
-    def __init__(self, address: str) -> None:
+    Binding this watch requires both ``att_mtu=247`` here and the separate
+    :func:`protocol.encode_mtu_request_change` command after connection. A
+    2026-08-31 controlled trial used the same five CCCD subscriptions and
+    bind frames at MTU 23 and MTU 247: command 0 echoed the active MTU, and
+    only 247 caused command 27 followed by bound/verified status. Merely
+    keeping outbound chunks below 23 bytes is not equivalent.
+    """
+
+    def __init__(self, address: str, security_level: str = "low", att_mtu: int | None = None) -> None:
+        if security_level not in {"low", "medium", "high"}:
+            raise ValueError("security_level must be low, medium, or high")
+        if att_mtu is not None and not 23 <= att_mtu <= 517:
+            raise ValueError("att_mtu must be between 23 and 517")
         self._address = address
+        self._security_level = security_level
+        self._att_mtu = att_mtu
         self._process: asyncio.subprocess.Process | None = None
         self._notifications: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue()
         self._lines: asyncio.Queue[str] = asyncio.Queue()
@@ -75,6 +93,7 @@ class GatttoolSession:
         await _disconnect_local_bluez(self._address)
         self._process = await asyncio.create_subprocess_exec(
             "stdbuf", "-oL", "-eL", "gatttool", "-I", "-b", self._address,
+            "-l", self._security_level,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -92,9 +111,36 @@ class GatttoolSession:
             await asyncio.sleep(1.0)
             await self._send_line("connect")
             await self._wait_for_connection()
+            if self._att_mtu is not None:
+                await self._send_line(f"mtu {self._att_mtu}")
+                await self._wait_for_success_or_error(
+                    f"MTU was exchanged successfully: {self._att_mtu}"
+                )
             await self._enable_notifications(_READ_CCCD_HANDLE)
             await self._enable_notifications(_WRITE_CCCD_HANDLE)
             await self._enable_notifications(_ACTIVITY_CCCD_HANDLE)
+            await self._enable_notifications(_DATA_UPLOAD_CCCD_HANDLE)
+            await self._enable_notifications(_CHANNEL_6F05_CCCD_HANDLE)
+            if self._security_level != "low":
+                # Passing `-l medium` on gatttool's command line did not
+                # secure the connection it subsequently opened.  A live HCI
+                # capture on 2026-08-31 showed all application writes going
+                # out in the clear; only BlueZ's automatic reconnect *after*
+                # gatttool exited reused the LTK and enabled AES-CCM.
+                #
+                # Changing the interactive socket's level after `connect`
+                # is effective: LE Start Encryption and Encryption Change
+                # completed before the first protocol write in the follow-up
+                # capture.  Keep `-l` above as the requested initial policy,
+                # but repeat it here because this is the placement verified
+                # against the controller.
+                await self._send_line(f"sec-level {self._security_level}")
+                await self._wait_for(f"sec-level {self._security_level}")
+                # gatttool does not print a separate completion message for
+                # this command.  Allow the controller/key exchange to finish
+                # before returning the session to its caller.  In the live
+                # trace AES-CCM completed about 0.40 s after the command.
+                await asyncio.sleep(0.75)
         except TimeoutError as error:
             # Bare TimeoutError renders as an empty CLI error, which hides
             # the actionable problem from callers.
@@ -503,7 +549,7 @@ async def send_app_notification(
     last_error: Exception | None = None
     for _ in range(max(1, attempts)):
         try:
-            async with GatttoolSession(address) as session:
+            async with GatttoolSession(address, att_mtu=247) as session:
                 await session.send_message(
                     protocol.encode_app_notification_request(app_name, page_name, title, text, ticker_text)
                 )

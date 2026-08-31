@@ -21,12 +21,17 @@ COMMAND_READ = "16186f01-0000-1000-8000-00807f9b34fb"
 COMMAND_WRITE = "16186f02-0000-1000-8000-00807f9b34fb"
 ACTIVITY_DATA = "16186f03-0000-1000-8000-00807f9b34fb"
 DATA_UPLOAD = "16186f04-0000-1000-8000-00807f9b34fb"
+CHANNEL_6F05 = "16186f05-0000-1000-8000-00807f9b34fb"
 
-NOTIFICATION_CHANNELS = (COMMAND_READ, COMMAND_WRITE, ACTIVITY_DATA, DATA_UPLOAD)
+NOTIFICATION_CHANNELS = (COMMAND_READ, COMMAND_WRITE, ACTIVITY_DATA, DATA_UPLOAD, CHANNEL_6F05)
 
 # Command ids observed in a live capture of the official app (BLE_2026-08-29.zh).
+CMD_MTU_REQUEST_CHANGE = 0
 CMD_INQUIRY_BINDING_STATUS = 16
+CMD_BINDING_CHECK = 17
+CMD_BINDING_RESULT = 18
 CMD_VERIFY_USER_NUMBER = 19
+CMD_UNBIND_REQUEST = 23
 CMD_GET_DEVICE_INFO = 32
 CMD_GET_DEVICE_BATTERY = 33
 CMD_SET_SYSTEM_TIME = 48
@@ -49,6 +54,12 @@ NOTIFICATION_TYPE_MESSAGE = 2
 # SEND_APP_NOTIFICATION (179), the "Apricot"-protocol branch of
 # ControlBleTools.sendAppNotification -- see encode_app_notification_request.
 CMD_SEND_APP_NOTIFICATION = 179
+
+# BindAccountProtos.SEBindResultType / SEPhoneType values observed in the
+# official Android app's successful bind exchange.
+BIND_RESULT_SUCCESS = 0
+PHONE_TYPE_ANDROID = 0
+PHONE_TYPE_IOS = 1
 
 # Field-length caps the official app itself applies before sending an app
 # notification (ControlBleTools.sendAppNotification -> BleUtils.truncateString):
@@ -131,6 +142,73 @@ def encode_field_bytes(field_number: int, data: bytes) -> bytes:
 def encode_request(command_id: int) -> bytes:
     """Build the single-field protobuf payload `{1: command_id}` used for GET_* requests."""
     return encode_field_varint(1, command_id)
+
+
+def encode_mtu_request_change(
+    mtu: int = 247, minimum_chunk_size: int = 12, maximum_chunk_size: int = 12, mode: int = 0
+) -> bytes:
+    """Build the SDK-level MTU/chunk negotiation sent before bind status.
+
+    This is distinct from, and must agree with, ATT Exchange MTU. The
+    successful Android and Linux binds sent
+    ``08 00 9a 06 09 08 f7 01 10 0c 18 0c 20 00`` before command 16 after
+    negotiating ATT MTU 247; the watch replied ``08 00 10 f7 01``. With the
+    identical application request over ATT MTU 23, it instead replied
+    ``08 00 10 17`` and did not commit the bind.
+    """
+    settings = (
+        encode_field_varint(1, mtu)
+        + encode_field_varint(2, minimum_chunk_size)
+        + encode_field_varint(3, maximum_chunk_size)
+        + encode_field_varint(4, mode)
+    )
+    return encode_field_varint(1, CMD_MTU_REQUEST_CHANGE) + encode_field_bytes(99, settings)
+
+
+def encode_unbind_request() -> bytes:
+    """Build the destructive UNBIND_REQUEST (23) payload: ``08 17``.
+
+    This only clears the watch's protocol-level app binding. The official
+    Android app subsequently removes its OS Bluetooth bond separately; see
+    protocol.md's "Unbinding" section. Do not send this merely to disconnect.
+    """
+    return encode_request(CMD_UNBIND_REQUEST)
+
+
+def encode_binding_check_request(device_verify: bool = True) -> bytes:
+    """Build BINDING_CHECK (17), which starts the on-watch part of an app bind.
+
+    The observed Android request with ``device_verify=True`` is
+    ``08 11 1a 04 12 02 08 01``. It must be followed by a successful
+    :func:`encode_binding_result_request`, but the official app also makes a
+    vendor-backend bind request before sending that result. These encoders
+    alone are therefore not a complete reproduction of a real bind; do not
+    use this as a read-only status check.
+    """
+    bind_check = encode_field_varint(1, int(device_verify))
+    bind_account = encode_field_bytes(2, bind_check)
+    return encode_field_varint(1, CMD_BINDING_CHECK) + encode_field_bytes(3, bind_account)
+
+
+def encode_binding_result_request(user_id: str, phone_type: int = PHONE_TYPE_ANDROID) -> bytes:
+    """Build BINDING_RESULT (18), the wire half of a BINDING_CHECK exchange.
+
+    The observed Android success request for user ``2011999`` is
+    ``08 12 1a 0f 1a 0d 08 00 12 07 32 30 31 31 39 39 39 18 00``.
+    It changes the watch's app binding; the supplied user id is an app
+    account identifier, not a cryptographic secret. The official app sends
+    this only after the vendor backend accepts a device-registration request,
+    so this payload alone is not a complete reproduction of the app bind.
+    """
+    if phone_type not in (PHONE_TYPE_ANDROID, PHONE_TYPE_IOS):
+        raise ValueError("phone_type must be PHONE_TYPE_ANDROID or PHONE_TYPE_IOS")
+    bind_result = (
+        encode_field_varint(1, BIND_RESULT_SUCCESS)
+        + encode_field_bytes(2, user_id.encode("utf-8"))
+        + encode_field_varint(3, phone_type)
+    )
+    bind_account = encode_field_bytes(3, bind_result)
+    return encode_field_varint(1, CMD_BINDING_RESULT) + encode_field_bytes(3, bind_account)
 
 
 def encode_time(year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0) -> bytes:

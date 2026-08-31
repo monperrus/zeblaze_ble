@@ -121,6 +121,7 @@ Single-byte command ids observed live, sent as the protobuf payload
 | 17 | `0x11` | `BINDING_CHECK` — see "Binding" below |
 | 18 | `0x12` | `BINDING_RESULT` — see "Binding" below |
 | 19 | `0x13` | `VERIFY_USER_NUMBER` (carries the server-side numeric user id as a string, not a secret) |
+| 23 | `0x17` | `UNBIND_REQUEST` — destructive; see "Unbinding" below |
 | 25 | `0x19` | `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` — see "Classic-Bluetooth status" below |
 | 27 | `0x1b` | `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` — watch-initiated, same payload |
 | 32 | `0x20` | `GET_DEVICE_INFO` — bundles firmware/MAC/serial **and battery status** |
@@ -872,11 +873,251 @@ display):
 So the bind is intact and verified, and the watch still acked a 179 it did
 not show. Bind state alone does not gate display.
 
-**Not yet live-tested from this tool**: sending 17/18 ourselves to repair
-a broken bind over BLE-only (the 2026-08-30 attempt was blocked by the
-host's adapter going away mid-session). The exact bytes above are
-reproducible with `protocol.encode_field_varint`/`encode_field_bytes`;
-dedicated encoders are a natural next addition once tested.
+The complete request bytes were captured again in a fresh, successful bind
+on 2026-08-31 after an app unbind. The watch was unbound (`16` returned
+`request_binding_status: false`), and the official app sent:
+
+```
+-> 08 11 1a 04 12 02 08 01
+   # {1:17, 3:{2:{2:{1:true}}}}  BINDING_CHECK(device_verify=true)
+<- 08 11 ...                         # app parses success
+
+-> 08 12 1a 0f 1a 0d 08 00 12 07 "2011999" 18 00
+   # {1:18, 3:{3:{1:SUCCESS, 2:user_id, 3:ANDROID}}}
+<- 08 12 a0 06 00                    # {1:18, 100:0}
+```
+
+The app's `BINDING_CHECK` parse log says `device_verify: false` and
+`bind_check_result: SUCCESS`; the request's `device_verify=true` is its
+selected bind path, not a direct echo of that response field. A later status
+query returned `request_binding_status: true`, and `VERIFY_USER_NUMBER` also
+reported a healthy verified binding.
+
+`protocol.encode_binding_check_request()` and
+`protocol.encode_binding_result_request(user_id)` now reproduce these two
+requests byte-for-byte. They are deliberately protocol-level encoders only:
+they are **not a complete reproduction of the app bind**. The official app's captured
+ordering is:
+
+1. Query 16 and receive `request_binding_status: false`.
+2. Send 17 and receive the watch identity (type, MAC, serial, firmware).
+3. Submit that identity to the vendor backend's bind-device endpoint with
+   `userId`, `deviceMac`, `deviceName`, `deviceSn`, `deviceType`, and
+   `deviceVersion`. In the 2026-08-30 successful bind, the app logged the
+   backend request at 12:45:51.779 and its `code=0000` success at 12:45:51.875.
+4. Only then send 18 (at 12:45:51.951 in that capture), immediately queue
+   `SET_SYSTEM_TIME` (48) and the normal device-initialization commands, and
+   keep the connection alive. The watch first reported bound at 12:45:57.827.
+
+The backend response logged by the app is `code=0000, data=null`; there is
+no evidence that it returns a distinct value which is then sent to the watch.
+Whether the backend registration itself, the initialization queue, connection
+timing, or the watch confirmation caused the final commit remains unisolated.
+Our 2026-08-31 Linux experiment sent the exact 17/18 frames without step 3
+or the post-bind queue. Command 18 still returned its generic success ACK,
+but 16 stayed false and 19 stayed unverified after the watch's confirmation
+prompt reported pairing failure. Thus an ACK for 18 is transport acceptance,
+not evidence that the bind committed. No CLI command exposes these encoders;
+they must not be used for probing.
+
+### Binding experiments that did **not** commit (2026-08-31)
+
+The following are negative results, recorded explicitly so that none becomes
+an assumed prerequisite in a later implementation.  In every case the watch
+returned the generic success ACK `08 12 a0 06 00` for command 18, but then
+returned `request_binding_status: false` for 16 and
+`verify_result_type: false, binding_status: false` for 19.
+
+| Candidate explanation | What was reproduced | Result / conclusion |
+| --- | --- | --- |
+| Missing Linux BLE bond or trust | The watch was locally `Paired: yes`, `Bonded: yes`, and `Trusted: yes`. | **Not sufficient.** A local bond/trust flag does not make the app bind commit. |
+| Missing requested LE encryption | Two HCI-captured trials separated gatttool's command-line policy from actual controller state. Merely starting it with `-l medium` left the application connection unencrypted; BlueZ reused the LTK only on its automatic reconnect after gatttool exited. In the decisive trial, interactive `sec-level medium` was issued on the connected socket. `LE Start Encryption` used the stored LTK and `Encryption Change` enabled AES-CCM at capture time 481.219; the first command 16 write followed at 481.897. Exact 17/18 + 48/65/49/164, 16/19, and 179 traffic therefore crossed that encrypted handle. | **Rejected as the missing gate.** Command 18 still acked success, but command 16 remained false and 19 remained unverified/unbound. Link encryption alone does not commit the app bind. |
+| Missing post-bind setup commands alone | Exact 17 and 18 requests, then commands 48 (time), 65 (language list), 49 (time format), and 164 (realtime), all acknowledged, but without the successful command-0/ATT-MTU setup described below. | **Not sufficient by itself.** The familiar post-bind initialization sequence does not replace the SDK/ATT MTU setup. |
+| Missing vendor registration | The authenticated official-app backend request `POST /zh_watch/infowear/device/bind` was reproduced using the app's encrypted `{data: ...}` envelope. A subsequent request returned code `1000` (duplicate device binding). | **Not sufficient.** Server registration exists, but no separate server value has been observed going to the watch. |
+| Missing HFP phone service | A local HFP Audio Gateway completed the watch's full observed setup: `BRSF`, `CIND=?`, `CIND?`, `CMER`, `COPS`, `CMEE`, `BTRH`, `CLIP`, `CCWA`, `CGMI`, `CGMM`, `NREC`, `CCLK`, `VGS`, and `CSCS`. Every request received a syntactically correct successful response. | **Not sufficient.** HFP is operational, but it did not promote 16/19 to a bound/verified state. |
+| The visible `K: K` notification banner means a phone is globally bound | The same banner appeared while the phone itself was unbound. | **Rejected as an interpretation.** It is not evidence of a successful app bind or of which host the watch accepts. |
+| Notification content requires only an encrypted LE socket | After the HCI-confirmed AES-CCM transition above, command 179 was sent on the same encrypted handle and returned status 0. After fixing the transport to raise security on the connected socket, a separate command 179 (`Gmail`, title `Encrypted retry`, body `Notification after verified AES-CCM transport fix`) again returned `08 b3 01 a0 06 00`; the user observed the unchanged `K: K` banner of type Messenger. | **Rejected.** Link encryption does not make an unbound Linux peer's notification content authoritative. The successful Android bind used `BOND_NONE`, so an Android LE bond is not the missing notification prerequisite either. |
+
+The HFP mock is useful diagnostic infrastructure, not a proof that classic
+HFP is irrelevant: the full Android reference still has an authenticated,
+encrypted BR/EDR link.  What is now ruled out is the narrower hypothesis that
+the missing *AT-command application service alone* explains pairing failure.
+The narrower "Linux did not encrypt" hypothesis is now rejected. An earlier
+working hypothesis was that the watch retained state associated with the
+Android host's bond. Re-reading the successful bind log rejects that as a
+prerequisite: when Android opened the successful GATT connection at
+12:45:42.043 it logged `BondState:10` (`BluetoothDevice.BOND_NONE`), and it
+still logged `checkBondByMac:false` after binding. Bluetooth also identifies
+a bonded *host*, not which Android application is using the host stack.
+
+The Linux replay was therefore not strict at the full-session level even
+though commands 17 and 18 were byte-identical. Differences still present in
+the successful Android transaction are:
+
+1. Android enabled notifications on all five `6f01` through `6f05`
+   characteristics; the Linux transport enabled only `6f01` through `6f03`.
+2. Before command 16, Android sent protocol command 0
+   (`08 00 9a 06 09 08 f7 01 10 0c 18 0c 20 00`) and received
+   `08 00 10 f7 01`. This negotiates the SDK transport MTU/chunk settings and
+   is separate from the ATT MTU exchange. Linux omitted it.
+3. After commands 18/48/65/49/164 but before the first bound=true command 16,
+   the watch spontaneously sent command 27:
+   `08 1b 1a 19 42 17 08 01 10 01 1a 11 "D6:45:15:30:04:71"`.
+   This is `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` reporting two true
+   flags plus the watch MAC. The app transport acknowledged it; it did not
+   send a protobuf response. Linux's failed replay never observed this event.
+
+Command 27 is currently the strongest discriminating event. It can be a
+cause of the bind commit or a correlated report of the same internal state;
+the existing trace alone cannot distinguish those. Either way, a genuinely
+strict reproduction must negotiate command 0, subscribe to all five
+channels, reproduce the classic-link transition that makes the watch emit
+27, wait for that event, and only then query command 16.
+
+### Successful Linux application bind (2026-08-31)
+
+The full-session replay subsequently succeeded. Two consecutive trials
+isolate the SDK/ATT MTU relationship:
+
+1. With all five notifications enabled and the exact command 0 request sent,
+   but gatttool's default ATT MTU 23, the watch replied `08 00 10 17` (23).
+   It never emitted command 27; command 16 remained false and command 19
+   returned false/unbound.
+2. The transport then explicitly completed ATT Exchange MTU at 247 before
+   enabling the channels. The identical command 0 request now received the
+   reference reply `08 00 10 f7 01` (247). The remaining application sequence
+   was identical: 16(false), 17, 18, 48, 65, 49, and 164.
+
+After the second sequence the watch spontaneously emitted:
+
+```
+08 1b 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
+```
+
+This command 27 has its first status flag false and second flag true, unlike
+the Android reference's two true flags, so byte equality of that spontaneous
+event is not required. Immediately afterward command 16 returned
+`08 10 1a 02 08 01` (bound), and command 19 returned
+`08 13 1a 06 3a 04 08 01 10 01` (verified and bound). The Linux application
+bind therefore committed successfully.
+
+The only intentional change between the adjacent failed and successful
+trials was ATT MTU 247, reflected by command 0's reply. This makes the
+ATT-MTU/SDK-MTU agreement the strongest demonstrated commit prerequisite,
+while command 27 is an observable completion event rather than something the
+host should forge. `protocol.encode_mtu_request_change()` reproduces command
+0, and `GatttoolSession(..., att_mtu=247)` performs the required ATT exchange.
+
+The watch visibly displayed **"Pairing successful"** when this sequence
+committed. A subsequent command 179 (`Gmail`, title `Binding succeeded`, body
+`Full MTU 247 bind replay is now verified`) returned status 0 and displayed
+the complete title and body correctly. This replaces the previous `K: K`
+fallback and demonstrates end to end that the missing prerequisite was the
+MTU negotiation, not notification encoding, BLE encryption, Android bond
+identity, backend response data, or HFP AT-command emulation.
+
+Classic/HFP was then removed as a notification prerequisite: the local HFP
+Audio Gateway was stopped, all existing Bluetooth links were disconnected,
+and a fresh BLE-only session negotiated ATT MTU 247. Command 179 (`Gmail`,
+title `BLE only notification`, body `HFP gateway is stopped; this arrived
+over BLE alone`) returned status 0 and the user confirmed that all text
+displayed correctly. Thus Classic Bluetooth participates in the watch's call
+feature and reports status through commands 25/27, but no Classic or HFP link
+is required to deliver notifications after the application bind has
+committed.
+
+An encrypted post-bind notification was also attempted as a separate
+experiment. Twice, a session connected with ATT MTU 247, enabled all five
+CCCDs, and requested `sec-level medium`, but the watch did not return the
+chunked transport's ready-ACK for command 179; each attempt timed out before
+the protobuf was accepted. After disconnecting and reconnecting at
+`sec-level low`, an otherwise equivalent `Low-security control` notification
+immediately returned `08 b3 01 a0 06 00`. Therefore the failure is specific
+to the post-bind medium-security session, not loss of the application bind or
+general BLE availability. Without an HCI capture it is not yet known whether
+AES-CCM actually enabled, the stored LTK was rejected or replaced during the
+successful bind/pair transition, or the watch deliberately stopped the SDK
+transport after encryption. Do not describe this trial as a successfully
+delivered encrypted notification.
+
+### Testing lower-layer pairing identity
+
+Treat this as a trace-comparison experiment, not as a change to the protobuf
+messages.  Capture one **known-good Android bind** and one Linux failed bind
+from reset through the first post-bind status query, then compare these HCI
+events by connection handle and time:
+
+| Layer | Evidence in a good trace | What to compare against Linux |
+| --- | --- | --- |
+| LE peer identity | `LE Connection Complete` peer address/type; if a private address is used, controller resolving-list/identity information rather than only the over-air address. | Same peer address type and whether the controller treats it as an already-known identity. An advertising address alone is not a bond identity. |
+| LE bond use | `LE Long Term Key Request` followed by the host's positive LTK reply, then `Encryption Change enabled=1`. On first pairing, SMP `Pairing Request/Response`, Public Key, Random, and DHKey Check establish the Secure-Connections bond. | Whether Linux gets an LTK request and answers it successfully; a fresh SMP pairing is different evidence from reuse of an existing stored LTK. Record the `RAND`/`EDIV` selectors and key-size/authentication flags, but never publish key material. |
+| BR/EDR bond use | `Link Key Request` / positive link-key reply on reconnect, then `Authentication Complete` and `Encryption Change enabled=1`. A first-time classic pairing instead shows SSP IO-capability/user-confirmation and a `Link Key Notification`. | Whether BlueZ has and uses a classic link key for this controller/watch pair, rather than merely accepting an RFCOMM connection temporarily. |
+| Cross-transport derivation | If the controller derives a BR/EDR key from the LE bond (or vice versa), the chronological relationship of LE pairing, key notification, and the first classic authentication shows it. | Check whether the Linux LE and BR/EDR bonds are independently created/reused in the same way as Android's; do not infer CTKD merely from both links being connected. |
+
+Practical capture method on Linux: run `btmon -w linux-bind.snoop` *before*
+starting the bind and leave it running until after commands 16 and 19.  The
+Android `btsnoop_hci.log` reference is compared with Wireshark/tshark by HCI
+handle; do not compare packet numbers because the two controllers will order
+unrelated traffic differently.  Useful display filters are
+`bthci_evt.le_meta_subevent == 0x01` (LE connection complete),
+`bthci_evt.le_meta_subevent == 0x05` (LE LTK request), `btsmp`,
+`bthci_evt.code == 0x08` (encryption change), and classic
+`bthci_evt.code == 0x17` (link-key request).  Field names vary slightly by
+Wireshark release, so the event names are the durable reference.
+
+Other Android captures establish that the watch is capable of LE Secure
+Connections and encrypted classic HFP, but the successful bind discussed
+above started with Android reporting `BOND_NONE`. Consequently key equality
+is not the priority explanation for the bind commit. The higher-value trace
+comparison is the complete bidirectional application sequence and classic
+state chronology, especially command 0 and the watch-originated command 27.
+
+### Linux bond-identity result (2026-08-31)
+
+The privileged Linux capture closes several of the checks above:
+
+- LE connected with the watch's public address on handle 3585. There was no
+  SMP exchange and no newly generated key. The host issued `LE Start
+  Encryption` with its stored LTK (`RAND=0`, `EDIV=0`, the Secure Connections
+  selectors), and the controller reported `Encryption: Enabled with AES-CCM`.
+- Encryption completed before the first protocol request. Commands 16, 17,
+  18, 48, 65, 49, 164, 19, and 179 all used that same encrypted handle.
+- Classic BR/EDR independently received `Link Key Request`; Linux supplied
+  its stored link key, encryption enabled with a 16-byte key, and the HFP
+  service exchange proceeded.
+- Despite both stored keys being accepted and both transports being
+  encrypted, command 16 remained false and command 19 returned
+  `verify_result_type:false, binding_status:false` after command 18.
+
+Therefore Linux is not presenting an ephemeral unbonded peer, and the watch
+is not rejecting Linux's keys at the controller layer. But this does not
+explain the successful Android bind, which did not require an Android LE bond.
+The priority is now the missing full-session events above, especially the
+watch-originated command 27, rather than equality of Android and Linux keys.
+
+## Unbinding: `UNBIND_REQUEST` (23)
+
+Captured live from the official Android app at 2026-08-31 20:53:17 while
+the user selected its unbind action. The protocol-level request is simply:
+
+```
+-> 08 17                    # {1: 23}
+<- 08 17 a0 06 00           # {1: 23, 100: 0} (success)
+```
+
+`protocol.encode_unbind_request()` produces the request. This is **not** a
+connection-management command: it clears the watch's app binding and is
+destructive/requires re-binding. Do not send it merely to disconnect or to
+test a link.
+
+The Android app then performs a separate sequence: it finishes in-flight
+fitness sync, disconnects the classic link (remote termination at
+20:53:18.626), disconnects the LE GATT link (phone-local termination at
+20:53:19.147), and invokes Android's Bluetooth unpair operation. Its own
+log reports the phone bond as `BondState:12` immediately beforehand and
+`Unpair a Bluetooth device returnValue = true` afterward. Thus command 23
+alone is observed to clear the protocol binding; removing the phone's LE
+and classic bonds is a distinct host-side operation.
 
 ## Classic-Bluetooth status: `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` (25) and `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` (27)
 

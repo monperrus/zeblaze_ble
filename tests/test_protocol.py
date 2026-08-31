@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from zeblaze_ble import protocol
+from zeblaze_ble.gatttool_transport import GatttoolSession
 
 # function_type 1, night of 2026-08-30.
 SLEEP_PAYLOAD = bytes.fromhex(
@@ -108,6 +109,45 @@ APP_NOTIFICATION_FRAME = bytes.fromhex(
     "4d617274696e204d6f6e706572727573221968656c6c6f206d617274696e20686f772061726520"
     "796f753f2a104d617274696e204d6f6e706572727573"
 )
+
+
+def test_gatttool_session_rejects_unknown_security_level() -> None:
+    with pytest.raises(ValueError, match="security_level"):
+        GatttoolSession("D6:45:15:30:04:71", security_level="encrypted")
+
+
+def test_gatttool_session_rejects_invalid_att_mtu() -> None:
+    with pytest.raises(ValueError, match="att_mtu"):
+        GatttoolSession("D6:45:15:30:04:71", att_mtu=22)
+
+
+def test_encode_unbind_request_matches_the_live_capture() -> None:
+    # Official-app unbind at 2026-08-31 20:53:17.305; response was
+    # 08 17 a0 06 00 ({command: 23, status: 0}).
+    assert protocol.CMD_UNBIND_REQUEST == 23
+    assert protocol.encode_unbind_request() == bytes.fromhex("0817")
+
+
+def test_encode_mtu_request_change_matches_successful_bind_capture() -> None:
+    assert protocol.CMD_MTU_REQUEST_CHANGE == 0
+    assert protocol.encode_mtu_request_change() == bytes.fromhex(
+        "08009a060908f701100c180c2000"
+    )
+
+
+def test_encode_binding_requests_match_the_fresh_official_app_bind_capture() -> None:
+    # 2026-08-31 20:57:30/33: an unbound watch was bound to Android user 2011999.
+    assert protocol.CMD_BINDING_CHECK == 17
+    assert protocol.CMD_BINDING_RESULT == 18
+    assert protocol.encode_binding_check_request() == bytes.fromhex("08111a0412020801")
+    assert protocol.encode_binding_result_request("2011999") == bytes.fromhex(
+        "08121a0f1a0d08001207323031313939391800"
+    )
+
+
+def test_encode_binding_result_rejects_an_unknown_phone_type() -> None:
+    with pytest.raises(ValueError):
+        protocol.encode_binding_result_request("2011999", phone_type=2)
 
 
 def test_encode_app_notification_matches_the_captured_working_frame() -> None:

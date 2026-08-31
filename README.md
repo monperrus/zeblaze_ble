@@ -204,7 +204,7 @@ Sends `SEND_APP_NOTIFICATION` (command id 179) — the exact path the official
 app itself uses for every third-party notification, recovered from the
 decompiled APK (`ControlBleTools.sendAppNotification`). Takes `--app`
 (appName), `--sender` (title), `--text` (body), `--ticker` (tickerText,
-defaults to `--text`), `--page` (pageName), and `--attempts` (default 8,
+defaults to `--sender`), `--page` (pageName), and `--attempts` (default 8,
 for the same BLE ack flakiness every write command shares). No
 precondition commands are sent — live testing showed they're not needed.
 
@@ -213,10 +213,11 @@ including multi-chunk payloads. **Caveat, learned the hard way**: ack !=
 display. While the watch was in a user-id-mismatch bind state it acked
 every 179 but showed one stale cached banner and discarded the new
 payloads (the "K: K" that never changed, which contained no K in the sent
-bytes at all). Display is gated on a valid bind -- see protocol.md's
-"Binding" section for the 17/18 repair sequence; sending that from this
-tool is the next untested step. Once bound, 179 was the first notification
-variant confirmed to display over a BLE-only link.
+bytes at all). Display is gated on a valid bind. The binding sequence was
+successfully reproduced on Linux after negotiating ATT MTU 247 and sending
+the SDK-level command 0 before 16/17/18; see protocol.md's "Successful Linux
+application bind" section. Once bound, command 179 displays in full over a
+BLE-only link with no Classic Bluetooth or HFP service connected.
 The title/ticker are capped at 50 chars and the text at 200 by the
 encoder, exactly as the official app caps them.
 
