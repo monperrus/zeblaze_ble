@@ -237,16 +237,19 @@ Command 48 sets the system time:
   5:{
     1:{
       1:unix_timestamp_seconds,
-      2:utc_offset_in_15_minute_units
+      2:utc_offset_in_eighth_hours
     }
   }
 }
 ```
 
-The standard clock-sync call omits the optional time-format field and thus
-does not alter the 12/24-hour preference. `protocol.encode_set_system_time_request()`
-implements this shape. Command 49 sets the 12/24-hour selection. Command 65
-requests the supported language list. Command 164 enables real-time reports:
+On this firmware the effective offset scale is eight units per hour: CEST
+(`UTC+02:00`) is encoded as 16. This is confirmed both by the official app's
+wire bytes and by the displayed watch time. The standard clock-sync call
+omits the optional time-format field and thus does not alter the 12/24-hour
+preference. `protocol.encode_set_system_time_request()` implements this
+shape. Command 49 sets the 12/24-hour selection. Command 65 requests the
+supported language list. Command 164 enables real-time reports:
 
 ```text
 08 a4 01 62 02 18 00

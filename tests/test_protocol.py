@@ -167,9 +167,9 @@ def test_parse_minimal_binding_responses() -> None:
 
 
 def test_encode_set_system_time_matches_the_official_app_shape() -> None:
-    # {1:48, 5:{1:{1:1700000000, 2:8}}}; time_format is intentionally absent.
-    assert protocol.encode_set_system_time_request(1_700_000_000, 8) == bytes.fromhex(
-        "08302a0a0a080880e2cfaa061008"
+    # {1:48, 5:{1:{1:1700000000, 2:16}}}; CEST is 16 in the captured app frame.
+    assert protocol.encode_set_system_time_request(1_700_000_000, 16) == bytes.fromhex(
+        "08302a0a0a080880e2cfaa061010"
     )
 
 

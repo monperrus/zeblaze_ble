@@ -53,7 +53,7 @@ class BindOutcome:
     binding_status_response: bytes
     bound: bool
     timestamp: int
-    utc_offset_quarters: int
+    utc_offset_eighth_hours: int
     time_response: bytes
     watch_messages: tuple[bytes, ...]
 
@@ -553,9 +553,9 @@ async def bind_watch(
             raise RuntimeError("watch accepted command 18 but still reports unbound")
 
         watch_messages.extend(await session.receive_pending_messages(grace_seconds=1.0))
-        timestamp, utc_offset_quarters = _local_time_parameters()
+        timestamp, utc_offset_eighth_hours = _local_time_parameters()
         await session.send_message(
-            protocol.encode_set_system_time_request(timestamp, utc_offset_quarters)
+            protocol.encode_set_system_time_request(timestamp, utc_offset_eighth_hours)
         )
         time_response = await session.receive_message()
         time_status = protocol.parse_generic_response_status(
@@ -571,22 +571,22 @@ async def bind_watch(
         binding_status_response=binding_status_response,
         bound=bound,
         timestamp=timestamp,
-        utc_offset_quarters=utc_offset_quarters,
+        utc_offset_eighth_hours=utc_offset_eighth_hours,
         time_response=time_response,
         watch_messages=tuple(watch_messages),
     )
 
 
 def _local_time_parameters(now: dt.datetime | None = None) -> tuple[int, int]:
-    """Return Unix seconds and the current local UTC offset in quarter-hours."""
+    """Return Unix seconds and this firmware's UTC-offset units (eight/hour)."""
     local_now = (now or dt.datetime.now().astimezone()).astimezone()
     offset = local_now.utcoffset() or dt.timedelta()
-    return int(local_now.timestamp()), int(offset.total_seconds() / 900)
+    return int(local_now.timestamp()), int(offset.total_seconds() / 450)
 
 
 async def set_watch_time(address: str) -> tuple[int, int, bytes, tuple[bytes, ...]]:
     """Negotiate MTU 247 and synchronize the watch with this host's clock."""
-    timestamp, utc_offset_quarters = _local_time_parameters()
+    timestamp, utc_offset_eighth_hours = _local_time_parameters()
     async with GatttoolSession(address, att_mtu=247) as session:
         watch_messages = await session.receive_pending_messages(grace_seconds=2.0)
         await session.send_message(protocol.encode_mtu_request_change())
@@ -596,13 +596,13 @@ async def set_watch_time(address: str) -> tuple[int, int, bytes, tuple[bytes, ..
             raise RuntimeError(f"watch confirmed ATT MTU {mtu}, expected 247")
 
         await session.send_message(
-            protocol.encode_set_system_time_request(timestamp, utc_offset_quarters)
+            protocol.encode_set_system_time_request(timestamp, utc_offset_eighth_hours)
         )
         response = await session.receive_message()
         status = protocol.parse_generic_response_status(response, protocol.CMD_SET_SYSTEM_TIME)
         if status != 0:
             raise RuntimeError(f"setting system time failed with status {status}")
-    return timestamp, utc_offset_quarters, response, tuple(watch_messages)
+    return timestamp, utc_offset_eighth_hours, response, tuple(watch_messages)
 
 
 async def send_notification(

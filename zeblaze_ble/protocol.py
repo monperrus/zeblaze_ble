@@ -219,8 +219,8 @@ def encode_binding_result_request(user_id: str, phone_type: int = PHONE_TYPE_AND
     return encode_field_varint(1, CMD_BINDING_RESULT) + encode_field_bytes(3, bind_account)
 
 
-def encode_set_system_time_request(timestamp: int, utc_offset_quarters: int) -> bytes:
-    """Build command 48 using Unix seconds and UTC offset in 15-minute units.
+def encode_set_system_time_request(timestamp: int, utc_offset_eighth_hours: int) -> bytes:
+    """Build command 48 using Unix seconds and UTC offset in eighth-hours.
 
     This matches ``ControlBleTools.setSystemTime(long)``: its optional
     ``time_format`` field is omitted, so synchronizing the clock does not
@@ -228,9 +228,9 @@ def encode_set_system_time_request(timestamp: int, utc_offset_quarters: int) -> 
     """
     if not 0 <= timestamp < (1 << 31):
         raise ValueError("timestamp must fit a positive protobuf int32")
-    if not -48 <= utc_offset_quarters <= 56:
+    if not -96 <= utc_offset_eighth_hours <= 112:
         raise ValueError("UTC offset must be between -12:00 and +14:00")
-    time_set = encode_field_varint(1, timestamp) + encode_field_int32(2, utc_offset_quarters)
+    time_set = encode_field_varint(1, timestamp) + encode_field_int32(2, utc_offset_eighth_hours)
     system_time = encode_field_bytes(1, time_set)
     return encode_field_varint(1, CMD_SET_SYSTEM_TIME) + encode_field_bytes(5, system_time)
 
