@@ -136,6 +136,12 @@ Single-byte command ids observed live, sent as the protobuf payload
 | 165 | `0xa5 0x01` | `REPORT_BASIC_DATA` — watch-initiated push, never sent by us |
 | 178 | `0xb2 0x01` | `SEND_SYSTEM_NOTIFICATION` — see "Push notification" below |
 | 179 | `0xb3 0x01` | `SEND_APP_NOTIFICATION` — see "App push notification" below |
+| 211 | `0xd3 0x01` | `GET_EVENT_INFO_LIST` — see "Event reminders" below |
+| 212 | `0xd4 0x01` | `SET_EVENT_INFO_LIST` — see "Event reminders" below |
+| 214 | `0xd6 0x01` | seen as a watch-initiated push, response `7a 0b 1a 09 {1:1, 2:5, 3:0, 4:130}`; not decoded |
+| 247 | `0xf7 0x01` | `GET_SCREEN_SETTING` — response `{15: {14: {1: brightness_level, 2: normally_on_switch, 3: on_screen_duration, 4: double_click_the_highlighted_screen}}}` |
+| 249 | `0xf9 0x01` | `REQUEST_SCREEN_SETTING` — watch-initiated, asks the app to re-read the screen settings |
+| 495 | `0x1ef` | `GET_NOTIFICATION_SETTINGS` — observed returning `errorCode = 1` (unsupported on this model) |
 | 480 | `0x1e0` | seen as `getClassicBluetoothState()`; multi-byte varint (`e0 03`) since >127 |
 
 `GET_DEVICE_INFO` (32), the fitness-data commands (112/113/115), the
@@ -686,6 +692,79 @@ falls back to the title; that was an artifact of the stale-banner session
 above, not a real rule, and has been retracted. The CLI's
 `--ticker`-defaults-to-`--text` behavior was kept (harmless, matches the
 real app, which always has a ticker from Android).
+
+## Event reminders: `SET_EVENT_INFO_LIST` (212) / `GET_EVENT_INFO_LIST` (211)
+
+Captured live 2026-08-31 from the official app (`controlbletools ->
+setEventInfoList()/getEventInfoList()`), cross-checked byte-for-byte against
+the HCI snoop of the same session. **This is the only confirmed way to get
+arbitrary phone-authored text to render on this watch's screen** — see the
+caveat at the end.
+
+Envelope field is **15** (`0x7a`, `SEEvent`), not the 13 that the
+notification commands use. Inside it, field 2 is the list message:
+
+```
+SEEventInfoList {
+  1: repeated EventInfo   # the whole list, resent in full on every set
+  2: support_max_events   # read-only, watch-reported; 5 on this model
+}
+EventInfo {
+  1: description  # string, the text the watch displays
+  2: time { 1:year 2:month 3:day 4:hour 5:minute 6:second }   # same submessage as everywhere else
+  3: is_finish    # bool, request-only; the watch's echo omits it
+}
+```
+
+`SET_EVENT_INFO_LIST` (212) request — two events, "vgvg" at 07:09 and "hgv"
+at 07:29 on 2026-08-31:
+
+```
+08 d4 01 7a 33 12 31
+  0a 17 0a 04 76 67 76 67  12 0d 08 ea 0f 10 08 18 1f 20 07 28 09 30 00  18 00
+  0a 16 0a 03 68 67 76     12 0d 08 ea 0f 10 08 18 1f 20 07 28 1d 30 00  18 00
+```
+
+Response is the plain ack `08 d4 01 a0 06 00` (`{1: 212, 100: 0}`).
+
+`GET_EVENT_INFO_LIST` (211) request is the bare `08 d3 01`; the response
+echoes the stored list plus the cap, with field 3 (`is_finish`) stripped:
+
+```
+08 d3 01 7a 31 12 2f
+  0a 15 0a 04 76 67 76 67 12 0d 08 ea 0f 10 08 18 1f 20 07 28 09 30 00
+  0a 14 0a 03 68 67 76    12 0d 08 ea 0f 10 08 18 1f 20 07 28 1d 30 00
+  10 05
+```
+
+With no events stored the response is `08 d3 01 7a 04 12 02 10 05`, i.e.
+just `support_max_events: 5`.
+
+Semantics, as observed: 212 replaces the entire list (there is no add/delete
+command — to remove an event, resend the list without it). The watch then
+fires each event **locally, from its own clock**, at the stored
+minute — in the capture, the 07:29 event displayed its text on the watch at
+07:29 with **no BLE or classic-BT traffic at all in that second**. So this
+is a scheduled local reminder, not a push: it gets text onto the screen, but
+only at a minute-granular pre-programmed time, and only 5 at a time. It does
+not answer the open `SEND_SYSTEM_NOTIFICATION` (178) display question.
+
+## The watch holds a classic-BT HFP link while the app is connected
+
+Also from the 2026-08-31 capture, and relevant to the 178-display question:
+the watch (`d6:45:15:30:04:71`, the "…Calling_0471" model) opens a **BR/EDR
+ACL** to the phone (`HCI Connection Complete`, handle 0x8) and then a full
+**Hands-Free Profile** session over RFCOMM — the watch is the HF, the phone
+the AG: SDP queries for `0x111e` (Handsfree) followed by `AT+BRSF=255`,
+`AT+CIND=?`, `AT+CMER`, `AT+CHLD`, `AT+COPS` and periodic `+CIEV:` indicator
+pushes from the phone. This is a live, ordinary HFP link running alongside
+the BLE GATT session for the entire capture.
+
+No message-access (MAP/MNS) channel is opened, and no notification text
+crosses the classic link — so classic BT is not *carrying* notification
+content here. But its mere presence is what a pure-BLE Linux client lacks,
+and matches the standing hypothesis in `TODO.md` that this model gates
+notification *display* on having a classic link.
 
 ## Binding: `BINDING_CHECK` (17) and `BINDING_RESULT` (18)
 
