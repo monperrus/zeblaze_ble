@@ -330,6 +330,35 @@ four separate sessions and got the full, byte-identical data bean every
 time. The empty-success shape means the watch has no data for that
 `(date, function_type)` — not that it has already handed it over once.
 
+### Heart-rate sampling frequency (`function_type` 2)
+
+`ContinuousHeartRate.frequency_minutes` is the sampling interval the watch
+recorded that day with, and it is the **only** thing that says how the
+array maps onto the clock — never assume a fixed bucket count. Every
+capture so far reported `5`, giving `1440 / 5` = **288 buckets per day**, so
+bucket `i` covers local time `i * 5` minutes past midnight (bucket 64 =
+05:20). The array length has matched `1440 / frequency` exactly in every
+capture; treat a mismatch as a decode error rather than padding.
+
+Two consequences worth keeping in mind when consuming this data:
+
+- **A zero bucket means no sample was taken, not a heart rate of zero.**
+  Skip zeros rather than averaging them in. On a real captured day, 287 of
+  the 288 buckets were zero and one held 60 bpm — the watch is not sampling
+  every 5 minutes around the clock even though the frequency says 5.
+- `max_value` / `min_value` are the watch's own summary over the non-zero
+  samples (both were 60 on that day, consistent with the single sample);
+  `resting_value` was 0, i.e. not computed, with that little data.
+
+The frequency is a per-day property of the returned bean, not a constant of
+this model: the watch's own "continuous heart rate" setting is expected to
+change it (see `TODO.md`), so re-read `frequency_minutes` per bucket instead
+of hard-coding 5 or 288.
+
+The separate `hour_max_raw` / `hour_min_raw` arrays are 24 bytes each, one
+byte per hour of the day, and were all-zero even on the day that had a
+sample — so their exact semantics are unconfirmed.
+
 ### Sleep data (`function_type` 1)
 
 One bucket = one night, requested exactly like any other fitness bucket:
