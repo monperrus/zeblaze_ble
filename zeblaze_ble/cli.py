@@ -313,7 +313,8 @@ def main() -> None:
     try:
         raise SystemExit(asyncio.run(run(arguments)))
     except (BleakError, ConnectionError, RuntimeError, TimeoutError) as error:
-        raise SystemExit(f"Bluetooth operation failed: {error}")
+        detail = str(error) or type(error).__name__
+        raise SystemExit(f"Bluetooth operation failed: {detail}")
 
 
 if __name__ == "__main__":
