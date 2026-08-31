@@ -121,6 +121,8 @@ Single-byte command ids observed live, sent as the protobuf payload
 | 17 | `0x11` | `BINDING_CHECK` — see "Binding" below |
 | 18 | `0x12` | `BINDING_RESULT` — see "Binding" below |
 | 19 | `0x13` | `VERIFY_USER_NUMBER` (carries the server-side numeric user id as a string, not a secret) |
+| 25 | `0x19` | `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` — see "Classic-Bluetooth status" below |
+| 27 | `0x1b` | `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` — watch-initiated, same payload |
 | 32 | `0x20` | `GET_DEVICE_INFO` — bundles firmware/MAC/serial **and battery status** |
 | 33 | `0x21` | `GET_DEVICE_BATTERY` |
 | 48 | `0x30` | `SET_SYSTEM_TIME` |
@@ -559,9 +561,13 @@ across retries:
 which decodes to `{1: 27, 3: {8: {1: 0, 2: 1, 3: "<watch MAC as ASCII>"}}}`
 — command id 27 is never sent by this tool, and the shape doesn't match the
 generic ack (`{1: <echoed command id>, 100: <code>}`) used everywhere else
-in this protocol. Its exact meaning (a distinct "already delivered, nothing
-to send" reply vs. an unrelated periodic identity broadcast that merely
-coincides with this window) is **not confirmed** — but a premature confirm
+in this protocol. **It is unrelated to fitness**: 27 is
+`REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` and the payload is
+`SEBindAccount.classicBluetoothStatus` — see "Classic-Bluetooth status"
+below. It appears in this window only because the watch emits it whenever
+its classic link is down, which it always is for this tool. The earlier
+reading of it as a fitness "already delivered, nothing to send" reply is
+retracted. Separately, a premature confirm
 reproducibly and, so far, permanently makes the real payload for those
 entries unobtainable. `request_workout_data` raises instead of confirming
 when the drain comes back incomplete.
@@ -871,6 +877,39 @@ a broken bind over BLE-only (the 2026-08-30 attempt was blocked by the
 host's adapter going away mid-session). The exact bytes above are
 reproducible with `protocol.encode_field_varint`/`encode_field_bytes`;
 dedicated encoders are a natural next addition once tested.
+
+## Classic-Bluetooth status: `INQUIRY_CLASSIC_BLUETOOTH_CONNECT_STATUS` (25) and `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` (27)
+
+Both carry `SEBindAccount.classicBluetoothStatus` (field 8), an
+`SEClassicBluetoothStatus`, whose field numbers come from the decompiled
+`BindAccountProtos$SEClassicBluetoothStatus`:
+
+| # | Field | Type |
+| --- | --- | --- |
+| 1 | `inquiryClassicBluetoothConnectStatus` | bool |
+| 2 | `inquiryClassicBluetoothSwitch` | bool |
+| 3 | `inquiryClassicBluetoothMac` | string — **the watch's own** classic MAC |
+
+25 is the central's query; 27 is the watch pushing the same payload
+unprompted. Live, 2026-08-31, BLE-only from this tool:
+
+```
+-> 08 19
+<- 08 19 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
+   = {1: 25, 3: {8: {1: 0, 2: 1, 3: "D6:45:15:30:04:71"}}}
+```
+
+i.e. **classic radio switched on, nothing connected to it**, plus the
+address to connect to — byte-for-byte the same status the watch pushes as
+27. So the watch tracks, and volunteers, whether it currently has a classic
+link, and this tool has never given it one.
+
+That makes 25 a direct read-out of the variable the standing
+notification-display hypothesis is about (see `TODO.md`): every 179 that
+acked without displaying was sent while this query returns
+`connect_status: false`, and the one 179 known to have displayed was sent
+by a phone holding a live classic HFP link. Correlation only — not yet a
+demonstrated cause.
 
 ## Link security: no application-layer crypto; encryption is the peer's choice
 
