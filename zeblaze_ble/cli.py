@@ -119,6 +119,12 @@ def parser() -> argparse.ArgumentParser:
     app_notify_command.add_argument("--page", default="", help="pageName (unused by the app for third-party notifications)")
     app_notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
     app_notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    sleep_command = commands.add_parser(
+        "sleep",
+        help="fetch every currently-available night of sleep data (performs protocol writes)",
+    )
+    sleep_command.add_argument("address")
+    sleep_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     workout_command = commands.add_parser(
         "workout",
         help="fetch queued workout data (summary, GPS track) from the watch (performs protocol writes)",
@@ -176,6 +182,22 @@ async def run(arguments: argparse.Namespace) -> int:
         )
         return 0
 
+    if arguments.command == "sleep":
+        results = await request_fitness_data(arguments.address, (protocol.FITNESS_TYPE_SLEEP,))
+        print(
+            json.dumps(
+                [
+                    {
+                        "date": f"{entry.year:04d}-{entry.month:02d}-{entry.day:02d}",
+                        "data": _jsonable(data),
+                    }
+                    for entry, data in results
+                ],
+                indent=2,
+            )
+        )
+        return 0
+
     if arguments.command == "realtime":
         readings = await enable_real_time_data_and_listen(arguments.address, arguments.seconds)
         print(json.dumps([_jsonable(reading) for reading in readings], indent=2))
@@ -219,6 +241,8 @@ async def run(arguments: argparse.Namespace) -> int:
         )
         print(json.dumps({"response_hex": response.hex()}, indent=2))
         return 0
+
+    if arguments.command == "workout":
         data = await request_workout_data(arguments.address)
         result = {
             "entries": [_jsonable(entry) for entry in data.entries],

@@ -2,7 +2,7 @@
 
 Python package for the Zeblaze watches, developed from a Beyond 3 Pro. 
 
-Main features: `battery`, `fitness`, `realtime`, `heartrate`, `notify`, and `workout`
+Main features: `battery`, `fitness`, `sleep`, `realtime`, `heartrate`, `notify`, and `workout`
 
 ## Install
 
@@ -95,16 +95,56 @@ zeblaze-ble fitness <ADDRESS> --i-understand-this-writes
 zeblaze-ble realtime <ADDRESS> --seconds 20 --i-understand-this-writes
 ```
 
-`fitness` enumerates and fetches every currently-available steps/distance/
-calories/heart-rate/activity-duration/effective-standing bucket the watch
-has queued. `realtime` enables the watch's real-time data push and prints
-each `REPORT_BASIC_DATA` reading (steps, calories, distance, heart rate,
-blood oxygen, effective standing, battery) as it arrives. Both are gated
-behind `--i-understand-this-writes` for the same reason as `battery`. Full
-protocol writeup, including exactly what fields mean and what's still
-unverified (e.g. no GPS/location command has been found yet, and the packed
-step/distance/calorie byte arrays are unverified against real non-zero
-data since this watch is fresh): `zeblaze_ble/protocol.md`.
+`fitness` enumerates and fetches every currently-available bucket the watch
+has queued: steps/distance/calories, sleep, heart rate, activity duration
+and effective standing. `realtime` enables the watch's real-time data push
+and prints each `REPORT_BASIC_DATA` reading (steps, calories, distance,
+heart rate, blood oxygen, effective standing, battery) as it arrives. Both
+are gated behind `--i-understand-this-writes` for the same reason as
+`battery`. Full protocol writeup, including exactly what fields mean and
+what's still unverified (e.g. no GPS/location command has been found yet):
+`zeblaze_ble/protocol.md`.
+
+### Sleep
+
+```bash
+zeblaze-ble sleep <ADDRESS> --i-understand-this-writes
+```
+
+Fetches only the sleep buckets — one per recorded night, listed under the
+date the night started on. Each night gives the summary the watch itself
+computes plus the full stage timeline.
+
+Live example (night of 2026-08-30, abridged):
+
+```json
+[
+  {
+    "date": "2026-08-30",
+    "data": {
+      "start_timestamp": 1788125940,
+      "end_timestamp": 1788149820,
+      "duration_minutes": 398,
+      "score": 79,
+      "awake_time": 0,
+      "light_sleep_time": 295,
+      "light_sleep_time_percentage": 75,
+      "deep_sleep_time": 103,
+      "deep_sleep_time_percentage": 25,
+      "rem_time": 0,
+      "sleep_type": 1,
+      "stages": [
+        {"start_timestamp": 1788125940, "duration_minutes": 27, "stage": 1},
+        {"start_timestamp": 1788127560, "duration_minutes": 22, "stage": 2}
+      ]
+    }
+  }
+]
+```
+
+All times are minutes, percentages are of `duration_minutes`, and stage is
+`0` awake / `1` light / `2` deep / `3` REM. The timeline's final entry is a
+zero-length awake marker at wake-up time.
 
 ### Notifications
 
@@ -160,10 +200,17 @@ Fetches whatever workout data the watch currently has queued: a summary
 (distance, duration, calories, steps, avg/max/min heart rate) and a full
 GPS track (timestamp + longitude + latitude per point).
 
-Returns an empty `entries` list if nothing is currently queued — per this
-protocol's established single-consume-queue behavior (see the "Fitness
-data" section), a workout already fetched
-won't be offered again.
+Returns an empty `entries` list if nothing is currently queued.
+
+## Tests
+
+```bash
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest
+```
+
+The parser tests run offline, against real payloads captured from the
+official app's own traffic.
 
 ## License 
 

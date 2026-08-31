@@ -5,6 +5,9 @@ description = "BLE discovery, capture, and live reads for the Zeblaze Beyond 3 P
 requires-python = ">=3.10"
 dependencies = ["bleak>=0.22"]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [project.scripts]
 zeblaze-ble = "zeblaze_ble.cli:main"
 

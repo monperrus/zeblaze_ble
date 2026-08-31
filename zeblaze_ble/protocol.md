@@ -126,7 +126,7 @@ Single-byte command ids observed live, sent as the protobuf payload
 | 48 | `0x30` | `SET_SYSTEM_TIME` |
 | 65 | `0x41` | `GET_LANGUAGE_DETAILED` |
 | 69 | `0x45` | `SET_USER_INFORMATION` |
-| 112 | `0x70` | `GET_FITNESS_TYPE_ID_LIST` — see "Fitness data" below |
+| 112 | `0x70` | `GET_FITNESS_TYPE_ID_LIST` — see "Fitness data" below (sleep included) |
 | 113 | `0x71` | `REQUEST_FITNESS_TYPE_ID` |
 | 115 | `0x73` | `CONFIRM_FITNESS_TYPE_ID` |
 | 117 | `0x75` | `GET_FITNESS_SPORT_ID_LIST` — see "Workout data" below |
@@ -211,7 +211,7 @@ charge_status: NOT_CHARGING ...`.
 - `INQUIRY_BINDING_STATUS` (16) response: `08 10 1a 02 08 01` → field 3 = `{1:
   1}`, i.e. `request_binding_status: true`.
 
-## Fitness data (steps, distance, calories, heart rate, activity, standing)
+## Fitness data (steps, distance, calories, sleep, heart rate, activity, standing)
 
 ### The `time` submessage
 
@@ -228,15 +228,16 @@ repeated]}}}` — two wrapper levels before a repeated list of `(date,
 function_type)` pairs, each one a currently-fetchable data bucket.
 `protocol.parse_fitness_type_id_list`.
 
-`function_type` values observed: `0` = daily (steps/distance/calories),
-`2` = continuous heart rate, `11` = activity duration, `12` = effective
-standing (see `protocol.FITNESS_TYPE_*`). In the one full capture available,
-the list always had exactly these 4 types × 2 dates (an all-time bucket
-dated `1970-01-01` and a today bucket) = 8 entries — this watch's `DEVICE_SETTING`
-capability flags (`android-observations.md`) also disable several other
-categories (blood pressure, ECG, body temperature, nap) for this model, so
-absence of other `function_type` values here may be model-specific rather
-than a protocol limitation.
+`function_type` values observed live: `0` = daily (steps/distance/calories),
+`1` = sleep, `2` = continuous heart rate, `11` = effective standing,
+`12` = activity duration (see `protocol.FITNESS_TYPE_*`). These match the
+app's own `FitnessProtos$SEFitnessTypeId$SEFitnessFunctionType` enum, which
+declares 25 values in total; the rest (blood oxygen, pressure, temperature,
+ECG, nap, drink water, and the "GoMore" algorithm outputs) have never been
+offered by this model, whose `DEVICE_SETTING`
+capability flags (`android-observations.md`) disable them. A sleep bucket
+appears only for a date the watch actually recorded a night on, so the
+number of entries varies with what the watch has to offer.
 
 ### `REQUEST_FITNESS_TYPE_ID` (113) — fetch one bucket
 
@@ -253,9 +254,16 @@ Response shape: `{1: 113, 9: {N: <bean>}}` where `N` depends on
 | function_type | response field N | bean |
 |---|---|---|
 | 0 (daily) | 4 | `DailyData` |
+| 1 (sleep) | 5 | `SleepData` |
 | 2 (continuous heart rate) | 6 | `ContinuousHeartRate` |
-| 11 (activity duration) | 14 | `ActivityDuration` |
-| 12 (effective standing) | 15 | `EffectiveStanding` |
+| 11 (effective standing) | 14 | `EffectiveStanding` |
+| 12 (activity duration) | 15 | `ActivityDuration` |
+
+Both the function-type values and these field numbers are also the app's own
+protobuf constants (`FitnessProtos$SEFitness`'s `*_FIELD_NUMBER`), which is
+how the 11/12 pair was settled: the wire evidence pairs type 11 with field 14
+and type 12 with field 15, and the app names field 14 effective standing and
+field 15 activity duration.
 
 Bean field layouts (all verified against real payloads, see
 `protocol.parse_daily_data` etc.):
@@ -264,25 +272,38 @@ Bean field layouts (all verified against real payloads, see
   3: steps_raw, 4: distance_frequency_minutes, 5: distance_raw,
   6: calorie_frequency_minutes, 7: calorie_raw}`. `frequency` was `60`
   (minutes) in every capture, giving 24 hourly buckets; each `*_raw` array
-  was 48 bytes = 2 bytes/bucket (1 byte would cap a value at 255, too low
-  for real step/calorie/distance counts). **Byte order/signedness within
-  each 2-byte bucket is unconfirmed** — every captured example had all-zero
-  data (fresh device, no history yet). Don't assume big- or little-endian
-  without a non-zero capture to check it against.
+  was 48 bytes = **2 bytes per bucket, big-endian unsigned**. Byte order is
+  confirmed by a non-zero capture: a day whose 21:00 and 23:00 hours held 29
+  and 95 steps encoded those buckets as `00 1d` and `00 5f`, matching the
+  app's own decode of the same bytes. `protocol.unpack_buckets` /
+  `DailyData.steps`/`.distance`/`.calories` do that decode. The app's
+  protobuf class declares further fields (8: HBA data, 9..15: today-only
+  step/calorie variants) that this model has never sent.
 - **`ContinuousHeartRate`**: `{1: echo, 2: frequency_minutes (5 observed,
   giving 288 buckets/day), 3: heart_rate_raw (1 byte/bucket — a heart rate
   fits in a byte, so this one's width is not in question, just still
   unconfirmed against non-zero data), 4: max_value, 5: min_value,
   6: resting_value, 7: hour_max_raw (24 bytes), 8: hour_min_raw (24 bytes)}`.
-- **`ActivityDuration`**: `{1: echo, 2: frequency_minutes (60), 3: raw
-  (24 bytes)}` — no further fields observed.
-- **`EffectiveStanding`**: `{1: echo, 2: frequency_minutes (60), 3: raw
-  (24 bytes), 4..31: 28 individual varint fields}`. Unlike the other three
-  beans, these per-hour-ish values are **separate varint fields**, not a
-  packed byte array — so `EffectiveStanding.hourly` is an exact decode, no
-  byte-order guessing needed. Field 5 was `100` in the only capture
-  (everything else 0); not identified (possibly a static goal value rather
-  than a measurement).
+- **`SleepData`** (function_type 1): `{1: echo, 2: start_sleep_timestamp,
+  3: end_sleep_timestamp, 4: sleep_duration, 5: sleep_score,
+  6: awake_time, 7: awake_time_percentage, 8: light_sleep_time,
+  9: light_sleep_time_percentage, 10: deep_sleep_time,
+  11: deep_sleep_time_percentage, 12: rapid_eye_movement_time,
+  13: rapid_eye_movement_time_percentage, 14: {1: [stage, ...repeated]},
+  15: sleep_type, 16: sleep_readiness_score}` — see "Sleep data" below.
+- **`EffectiveStanding`** (function_type 11, response field 14):
+  `{1: echo, 2: frequency_minutes (60), 3: raw (24 bytes)}` — no further
+  fields exist in the app's protobuf class either.
+- **`ActivityDuration`** (function_type 12, response field 15):
+  `{1: echo, 2: frequency_minutes (60), 3: raw (24 bytes),
+  4: daily_time, 5: daily_percentage, 6..31: 13 (time, percentage) pairs,
+  one per sport category}`. Unlike the other beans, everything past `raw` is
+  **separate varint fields**, not a packed byte array — so those are an
+  exact decode, no byte-order guessing needed. The category order (running,
+  walking, cycling, swimming, fitness exercise, outdoor, ball game, yoga,
+  winter, dance movement, aquatic, leisure, other) is the app's own
+  `SEActivityDurationData` field order. Field 5 (`daily_percentage`) was
+  `100` with everything else 0 in the captures so far.
 
 ### `CONFIRM_FITNESS_TYPE_ID` (115) — acknowledge a bucket
 
@@ -296,15 +317,42 @@ ack/error-code shape below — no bean data.
 `{1: <command_id echo>, 100: <varint, 0 = success>}` — e.g. `08 71 a0 06 00`
 decodes to `{1: 113, 100: 0}`. Seen for `SET_SYSTEM_TIME`, `CONFIRM_FITNESS_TYPE_ID`,
 and — importantly — **also returned by `REQUEST_FITNESS_TYPE_ID` itself**
-when there's nothing to send: re-requesting the exact same `(date,
-function_type)` bucket a second time in a later session (after it had
-already been `REQUEST`+`CONFIRM`'d once) got this empty-success shape
-instead of a data bean. Working hypothesis, not confirmed against
-documentation: buckets are **single-consume** — once confirmed, the watch
-won't re-send them. If re-fetching matters, this needs more investigation
-(a factory-reset-and-rebind cycle would very likely reset it, matching how
-this whole protocol was originally discovered, but that's a heavy way to
-test it).
+when there's nothing to send.
+
+Buckets are **not** single-consume, though: in the 2026-08-31 capture the
+app re-requested and re-confirmed the same `(2026-08-30, sleep)` bucket in
+four separate sessions and got the full, byte-identical data bean every
+time. The empty-success shape means the watch has no data for that
+`(date, function_type)` — not that it has already handed it over once.
+
+### Sleep data (`function_type` 1)
+
+One bucket = one night, requested exactly like any other fitness bucket:
+`REQUEST_FITNESS_TYPE_ID` (113) with `function_type` 1 and the date of the
+**evening** the night started (a night spanning 2026-08-30 22:39 → 2026-08-31
+05:17 is offered and returned under the date 2026-08-30). The bean comes
+back in field 5 of the response's field-9 wrapper. `protocol.parse_sleep_data`
+→ `SleepData`; `zeblaze-ble sleep <ADDRESS>` fetches only these buckets.
+
+Summary fields: `start_sleep_timestamp` / `end_sleep_timestamp` are Unix
+seconds in the watch's local time zone. `sleep_duration` and every
+`*_time` field are **minutes**; every `*_percentage` is a whole percent of
+`sleep_duration`. `sleep_score` is the app's 0-100 sleep score.
+`sleep_type` (field 15) is `1` = night sleep, `0` = daytime sleep
+(`protocol.SLEEP_TYPE_*`).
+
+Field 14 is the stage timeline, with the usual extra wrapper level:
+`{1: [{1: start_timestamp, 2: sleep_duration, 3: sleep_distribution_type},
+...repeated]}`. Each entry is one contiguous stretch of a single stage, in
+chronological order; `sleep_duration` is again minutes. The stage enum
+(`protocol.SLEEP_STAGE_*`) is `0` = awake, `1` = light, `2` = deep,
+`3` = rapid eye movement. The **last entry is a wake-up marker**: stage
+awake with duration 0, timestamped at `end_sleep_timestamp`.
+
+Verified against a live night (see `tests/test_protocol.py`, which parses
+the captured payload): 16 stage entries, and the per-stage durations summed
+by stage reproduce `light_sleep_time` = 295 and `deep_sleep_time` = 103
+exactly, with `sleep_duration` = 398 = their sum.
 
 ### Real-time push: `REAL_TIME_DATA_SWITCH` (164) / `REPORT_BASIC_DATA` (165)
 
@@ -659,16 +707,12 @@ AES-CCM anywhere.
   is a guess based on position, not a confirmed role (`6f03`'s neighboring
   guess, `ACTIVITY_DATA`, turned out to be accurate -- see "Workout data"
   above -- so `6f04`/`6f05` guesses are at least plausible, not baseless).
-- Byte order and signedness inside the packed 2-byte array fields
-  (`DailyData.steps_raw`/`distance_raw`/`calorie_raw`,
-  `ContinuousHeartRate.heart_rate_raw`'s hour arrays, `RealTimeData`'s
-  hourly arrays) — every captured example so far has been all-zero (fresh,
-  same-day-bound device with no accumulated activity), so there's nothing
-  to check an endianness guess against yet. Wear the watch for a full day
-  and re-run `zeblaze-ble fitness` to get a non-zero capture.
-- Whether `REQUEST_FITNESS_TYPE_ID` buckets are genuinely single-consume
-  (see "Fitness data" above) or something else explains the observed
-  empty-on-second-request behavior.
+- Byte order and signedness inside the packed 2-byte array fields other than
+  `DailyData`'s (`ContinuousHeartRate`'s hour arrays, `RealTimeData`'s
+  hourly arrays) — every captured example of those has been all-zero so far.
+  `DailyData`'s own arrays are settled (big-endian, see "Fitness data").
+- `SleepData` field 16 (`sleep_readiness_score`, a float in the app's class)
+  and the `DAYTIME_SLEEP` sleep type — never sent by this model so far.
 - `RealTimeData` fields 8, 9, and 13 (varints, always 0 so far) and field 10
   (a physiologicalCycle submessage, not parsed) — present but unidentified.
 - Command ids other than the ones documented above have request encodings

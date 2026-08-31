@@ -65,9 +65,27 @@ SPORT_DATA_GPS = 2  # GPS track -> list[GpsPoint]
 # type among these -- GPS data lives under the separate, unexplored
 # GET_FITNESS_SPORT_ID_LIST (117) workout-session mechanism instead).
 FITNESS_TYPE_DAILY = 0  # steps/distance/calories -> DailyData
+FITNESS_TYPE_SLEEP = 1  # one night's sleep summary + stage timeline -> SleepData
 FITNESS_TYPE_CONTINUOUS_HEART_RATE = 2  # -> ContinuousHeartRate
-FITNESS_TYPE_ACTIVITY_DURATION = 11  # -> ActivityDuration
-FITNESS_TYPE_EFFECTIVE_STANDING = 12  # -> EffectiveStanding
+FITNESS_TYPE_EFFECTIVE_STANDING = 11  # -> EffectiveStanding
+FITNESS_TYPE_ACTIVITY_DURATION = 12  # -> ActivityDuration
+
+# SESleepData.SESleepDistributionData.SESleepDistributionType
+SLEEP_STAGE_AWAKE = 0
+SLEEP_STAGE_LIGHT = 1
+SLEEP_STAGE_DEEP = 2
+SLEEP_STAGE_REM = 3
+
+SLEEP_STAGE_NAMES = {
+    SLEEP_STAGE_AWAKE: "awake",
+    SLEEP_STAGE_LIGHT: "light",
+    SLEEP_STAGE_DEEP: "deep",
+    SLEEP_STAGE_REM: "rem",
+}
+
+# SESleepData.SESleepType
+SLEEP_TYPE_DAYTIME = 0
+SLEEP_TYPE_NIGHT = 1
 
 # Field number, inside a REQUEST_FITNESS_TYPE_ID response's field 9, that
 # holds that function type's data bean. Not a formula -- an observed lookup
@@ -75,9 +93,10 @@ FITNESS_TYPE_EFFECTIVE_STANDING = 12  # -> EffectiveStanding
 # function_type value).
 _FITNESS_RESPONSE_FIELD = {
     FITNESS_TYPE_DAILY: 4,
+    FITNESS_TYPE_SLEEP: 5,
     FITNESS_TYPE_CONTINUOUS_HEART_RATE: 6,
-    FITNESS_TYPE_ACTIVITY_DURATION: 14,
-    FITNESS_TYPE_EFFECTIVE_STANDING: 15,
+    FITNESS_TYPE_EFFECTIVE_STANDING: 14,
+    FITNESS_TYPE_ACTIVITY_DURATION: 15,
 }
 
 _HEADER_PREFIX = bytes((0x00, 0x00, 0x00, 0x00))
@@ -382,6 +401,11 @@ def _int_field(fields: dict[int, list[ProtobufValue]], number: int) -> int:
     return raw
 
 
+def _optional_int(fields: dict[int, list[ProtobufValue]], number: int) -> int:
+    """Varint field, or 0 when absent -- protobuf omits zero-valued scalars on the wire."""
+    return _int_field(fields, number) if number in fields else 0
+
+
 def _bytes_field(fields: dict[int, list[ProtobufValue]], number: int) -> bytes:
     raw = fields[number][0].raw
     if not isinstance(raw, bytes):
@@ -438,16 +462,23 @@ def _fitness_bean_bytes(payload: bytes, function_type: int) -> bytes:
     return _bytes_field(wrapper, field_number)
 
 
+def unpack_buckets(raw: bytes) -> list[int]:
+    """Decode a 2-bytes-per-bucket big-endian array (`DailyData`'s `*_raw` fields).
+
+    Byte order verified against a non-zero capture (2026-08-31): a day with
+    24 steps and 19 m of distance in the 01:00 hour encoded as
+    `00 00 00 18 00 00...` and `00 00 00 13 00 00...` -- big-endian, unsigned.
+    """
+    return [int.from_bytes(raw[offset : offset + 2], "big") for offset in range(0, len(raw) - 1, 2)]
+
+
 @dataclass(frozen=True)
 class DailyData:
     """Steps/distance/calories, in `frequency`-minute buckets across the requested day.
 
-    The three `*_raw` arrays are 2-bytes-per-bucket (bucket count matches
-    1440/frequency, and 1 byte would cap a value at 255 which real step/
-    calorie/distance counts routinely exceed) but the exact integer encoding
-    (endianness, signedness) is UNVERIFIED -- only all-zero examples have
-    been captured so far. Raw bytes are exposed as-is; do not trust a
-    byte-order guess without a non-zero capture to check it against.
+    The three `*_raw` arrays are 2 bytes per bucket, big-endian unsigned
+    (bucket count matches 1440/frequency); the decoded `steps`, `distance`
+    and `calories` lists are the same values via `unpack_buckets`.
     """
 
     steps_frequency_minutes: int
@@ -456,6 +487,18 @@ class DailyData:
     distance_raw: bytes
     calorie_frequency_minutes: int
     calorie_raw: bytes
+
+    @property
+    def steps(self) -> list[int]:
+        return unpack_buckets(self.steps_raw)
+
+    @property
+    def distance(self) -> list[int]:
+        return unpack_buckets(self.distance_raw)
+
+    @property
+    def calories(self) -> list[int]:
+        return unpack_buckets(self.calorie_raw)
 
 
 def parse_daily_data(payload: bytes) -> DailyData:
@@ -467,6 +510,88 @@ def parse_daily_data(payload: bytes) -> DailyData:
         distance_raw=_bytes_field(bean, 5),
         calorie_frequency_minutes=_int_field(bean, 6),
         calorie_raw=_bytes_field(bean, 7),
+    )
+
+
+@dataclass(frozen=True)
+class SleepStage:
+    """One stretch of a single stage within a night, from `SleepData.stages`."""
+
+    start_timestamp: int
+    duration_minutes: int
+    stage: int
+
+    @property
+    def stage_name(self) -> str:
+        return SLEEP_STAGE_NAMES.get(self.stage, f"unknown_{self.stage}")
+
+
+@dataclass(frozen=True)
+class SleepData:
+    """One night's sleep: summary totals plus the stage timeline.
+
+    All `*_time` values are minutes and all `*_percentage` values are whole
+    percents of `duration_minutes`. Timestamps are Unix seconds in the
+    watch's local time zone. The last `stages` entry is the wake-up marker:
+    stage `awake` with `duration_minutes` 0 at `end_timestamp`.
+    """
+
+    start_timestamp: int
+    end_timestamp: int
+    duration_minutes: int
+    score: int
+    awake_time: int
+    awake_time_percentage: int
+    light_sleep_time: int
+    light_sleep_time_percentage: int
+    deep_sleep_time: int
+    deep_sleep_time_percentage: int
+    rem_time: int
+    rem_time_percentage: int
+    sleep_type: int
+    stages: list[SleepStage]
+
+    @property
+    def is_night_sleep(self) -> bool:
+        return self.sleep_type == SLEEP_TYPE_NIGHT
+
+
+def parse_sleep_data(payload: bytes) -> SleepData:
+    """Parse the `SESleepData` bean of a REQUEST_FITNESS_TYPE_ID (113) response.
+
+    Field numbers are the app's own `FitnessProtos$SESleepData` constants,
+    cross-checked against a live capture (see protocol.md).
+    """
+    bean = decode_protobuf(_fitness_bean_bytes(payload, FITNESS_TYPE_SLEEP))
+    stages: list[SleepStage] = []
+    if 14 in bean:
+        container = decode_protobuf(_bytes_field(bean, 14))
+        for value in container.get(1, []):
+            if not isinstance(value.raw, bytes):
+                continue
+            entry = decode_protobuf(value.raw)
+            stages.append(
+                SleepStage(
+                    start_timestamp=_optional_int(entry, 1),
+                    duration_minutes=_optional_int(entry, 2),
+                    stage=_optional_int(entry, 3),
+                )
+            )
+    return SleepData(
+        start_timestamp=_optional_int(bean, 2),
+        end_timestamp=_optional_int(bean, 3),
+        duration_minutes=_optional_int(bean, 4),
+        score=_optional_int(bean, 5),
+        awake_time=_optional_int(bean, 6),
+        awake_time_percentage=_optional_int(bean, 7),
+        light_sleep_time=_optional_int(bean, 8),
+        light_sleep_time_percentage=_optional_int(bean, 9),
+        deep_sleep_time=_optional_int(bean, 10),
+        deep_sleep_time_percentage=_optional_int(bean, 11),
+        rem_time=_optional_int(bean, 12),
+        rem_time_percentage=_optional_int(bean, 13),
+        sleep_type=_optional_int(bean, 15),
+        stages=stages,
     )
 
 
@@ -502,32 +627,65 @@ def parse_continuous_heart_rate(payload: bytes) -> ContinuousHeartRate:
 
 
 @dataclass(frozen=True)
-class ActivityDuration:
-    frequency_minutes: int
-    raw: bytes
-
-
-def parse_activity_duration(payload: bytes) -> ActivityDuration:
-    bean = decode_protobuf(_fitness_bean_bytes(payload, FITNESS_TYPE_ACTIVITY_DURATION))
-    return ActivityDuration(frequency_minutes=_int_field(bean, 2), raw=_bytes_field(bean, 3))
-
-
-@dataclass(frozen=True)
 class EffectiveStanding:
-    """Unlike the other fitness beans, the hourly values here are individual
-    varint fields (4..31, one per hour-ish bucket) rather than a packed byte
-    array -- so `hourly` is an exact, unambiguous decode, no byte-order
-    guessing involved."""
+    """`SEEffectiveStandingData` (function_type 11): frequency plus one packed
+    byte array, no further fields in the app's own protobuf class."""
 
     frequency_minutes: int
     raw: bytes
-    hourly: list[int]
 
 
 def parse_effective_standing(payload: bytes) -> EffectiveStanding:
     bean = decode_protobuf(_fitness_bean_bytes(payload, FITNESS_TYPE_EFFECTIVE_STANDING))
-    hourly = [_int_field(bean, n) for n in range(4, 32) if n in bean]
-    return EffectiveStanding(frequency_minutes=_int_field(bean, 2), raw=_bytes_field(bean, 3), hourly=hourly)
+    return EffectiveStanding(frequency_minutes=_int_field(bean, 2), raw=_bytes_field(bean, 3))
+
+
+# `SEActivityDurationData` fields 6..31: (time, percentage) pairs per sport
+# category, in the app's own declaration order.
+_ACTIVITY_SPORT_CATEGORIES = (
+    "running",
+    "walking",
+    "cycling",
+    "swimming",
+    "fitness_exercise",
+    "outdoor",
+    "ball_game",
+    "yoga",
+    "winter",
+    "dance_movement",
+    "aquatic",
+    "leisure",
+    "other",
+)
+
+
+@dataclass(frozen=True)
+class ActivityDuration:
+    """`SEActivityDurationData` (function_type 12).
+
+    Unlike the other fitness beans, everything past the packed `raw` array is
+    individual varint fields, so this is an exact decode with no byte-order
+    guessing: `daily_time`/`daily_percentage` (fields 4/5) and then one
+    (time, percentage) pair per sport category (fields 6..31)."""
+
+    frequency_minutes: int
+    raw: bytes
+    daily_time: int
+    daily_percentage: int
+    sport_time: dict[str, int]
+    sport_percentage: dict[str, int]
+
+
+def parse_activity_duration(payload: bytes) -> ActivityDuration:
+    bean = decode_protobuf(_fitness_bean_bytes(payload, FITNESS_TYPE_ACTIVITY_DURATION))
+    return ActivityDuration(
+        frequency_minutes=_int_field(bean, 2),
+        raw=_bytes_field(bean, 3),
+        daily_time=_optional_int(bean, 4),
+        daily_percentage=_optional_int(bean, 5),
+        sport_time={name: _optional_int(bean, 6 + 2 * index) for index, name in enumerate(_ACTIVITY_SPORT_CATEGORIES)},
+        sport_percentage={name: _optional_int(bean, 7 + 2 * index) for index, name in enumerate(_ACTIVITY_SPORT_CATEGORIES)},
+    )
 
 
 @dataclass(frozen=True)

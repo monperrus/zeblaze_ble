@@ -300,25 +300,33 @@ async def request_device_info(address: str) -> protocol.DeviceInfo:
 
 _FITNESS_PARSERS = {
     protocol.FITNESS_TYPE_DAILY: protocol.parse_daily_data,
+    protocol.FITNESS_TYPE_SLEEP: protocol.parse_sleep_data,
     protocol.FITNESS_TYPE_CONTINUOUS_HEART_RATE: protocol.parse_continuous_heart_rate,
     protocol.FITNESS_TYPE_ACTIVITY_DURATION: protocol.parse_activity_duration,
     protocol.FITNESS_TYPE_EFFECTIVE_STANDING: protocol.parse_effective_standing,
 }
 
 
-async def request_fitness_data(address: str) -> list[tuple[protocol.FitnessTypeEntry, object]]:
+async def request_fitness_data(
+    address: str, function_types: tuple[int, ...] | None = None
+) -> list[tuple[protocol.FitnessTypeEntry, object]]:
     """Connect, enumerate every currently-available fitness data bucket, and fetch+parse each.
 
     Follows the exact GET_FITNESS_TYPE_ID_LIST(112) -> [REQUEST_FITNESS_TYPE_ID(113) ->
     CONFIRM_FITNESS_TYPE_ID(115)]* sequence observed in the live capture. Entries whose
     function_type has no known parser (see protocol.py's "what isn't known yet") are
     returned with the raw payload bytes instead of a parsed dataclass.
+
+    `function_types` restricts the fetch to those `FITNESS_TYPE_*` buckets;
+    the default of None fetches every bucket the watch offers.
     """
     results: list[tuple[protocol.FitnessTypeEntry, object]] = []
     async with GatttoolSession(address) as session:
         await session.send_message(protocol.encode_request(protocol.CMD_GET_FITNESS_TYPE_ID_LIST))
         list_payload = await session.receive_message()
         entries = protocol.parse_fitness_type_id_list(list_payload)
+        if function_types is not None:
+            entries = [entry for entry in entries if entry.function_type in function_types]
 
         for entry in entries:
             await session.send_message(
