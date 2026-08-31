@@ -14,6 +14,7 @@ from bleak.exc import BleakError
 from . import protocol
 from .client import inspect, listen, scan, serialize_advertisement
 from .gatttool_transport import (
+    bind_watch,
     enable_real_time_data_and_listen,
     request_current_heart_rate,
     request_device_info,
@@ -50,6 +51,23 @@ def parser() -> argparse.ArgumentParser:
     listen_command.add_argument("address")
     listen_command.add_argument("--seconds", type=float, default=60)
     listen_command.add_argument("--output", type=Path, default=Path("zeblaze-capture.jsonl"))
+    bind_command = commands.add_parser(
+        "bind",
+        help="application-bind the watch using the minimal MTU/17/18 sequence",
+    )
+    bind_command.add_argument("address")
+    bind_command.add_argument(
+        "--user-id",
+        required=True,
+        help="application account identifier to persist on the watch",
+    )
+    bind_command.add_argument("--phone-type", choices=("android", "ios"), default="android")
+    bind_command.add_argument(
+        "--i-understand-this-writes",
+        action="store_true",
+        required=True,
+        help="required opt-in: binding persistently changes watch state",
+    )
     battery_command = commands.add_parser(
         "battery",
         help="send GET_DEVICE_INFO and print battery status (performs a protocol write)",
@@ -169,6 +187,28 @@ async def run(arguments: argparse.Namespace) -> int:
         else:
             result = await inspect(arguments.address)
         print(json.dumps(result, indent=2))
+        return 0
+
+    if arguments.command == "bind":
+        phone_type = {
+            "android": protocol.PHONE_TYPE_ANDROID,
+            "ios": protocol.PHONE_TYPE_IOS,
+        }[arguments.phone_type]
+        outcome = await bind_watch(arguments.address, arguments.user_id, phone_type)
+        print(
+            json.dumps(
+                {
+                    "bound": outcome.bound,
+                    "user_id": arguments.user_id,
+                    "phone_type": arguments.phone_type,
+                    "mtu": outcome.mtu,
+                    "binding_check_response_hex": outcome.binding_check_response.hex(),
+                    "binding_result_response_hex": outcome.binding_result_response.hex(),
+                    "binding_status_response_hex": outcome.binding_status_response.hex(),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if arguments.command == "battery":

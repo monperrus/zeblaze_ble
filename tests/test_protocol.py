@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from zeblaze_ble import protocol
+from zeblaze_ble.cli import parser
 from zeblaze_ble.gatttool_transport import GatttoolSession
 
 # function_type 1, night of 2026-08-30.
@@ -143,6 +144,30 @@ def test_encode_binding_requests_match_the_fresh_official_app_bind_capture() -> 
     assert protocol.encode_binding_result_request("2011999") == bytes.fromhex(
         "08121a0f1a0d08001207323031313939391800"
     )
+
+
+def test_parse_minimal_binding_responses() -> None:
+    assert protocol.parse_mtu_response(bytes.fromhex("080010f701")) == 247
+    assert protocol.parse_generic_response_status(bytes.fromhex("0812a00600"), 18) == 0
+    assert protocol.parse_binding_status_response(bytes.fromhex("08101a020801")) is True
+    assert protocol.parse_binding_status_response(bytes.fromhex("08101a020800")) is False
+
+
+def test_bind_cli_requires_explicit_user_id_and_write_opt_in() -> None:
+    arguments = parser().parse_args(
+        [
+            "bind",
+            "D6:45:15:30:04:71",
+            "--user-id",
+            "2011999",
+            "--phone-type",
+            "android",
+            "--i-understand-this-writes",
+        ]
+    )
+    assert arguments.command == "bind"
+    assert arguments.user_id == "2011999"
+    assert arguments.phone_type == "android"
 
 
 def test_encode_binding_result_rejects_an_unknown_phone_type() -> None:

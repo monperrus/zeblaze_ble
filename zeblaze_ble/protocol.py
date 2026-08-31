@@ -211,6 +211,31 @@ def encode_binding_result_request(user_id: str, phone_type: int = PHONE_TYPE_AND
     return encode_field_varint(1, CMD_BINDING_RESULT) + encode_field_bytes(3, bind_account)
 
 
+def parse_mtu_response(payload: bytes) -> int:
+    """Return the active MTU from a command-0 response."""
+    fields = decode_protobuf(payload)
+    if _int_field(fields, 1) != CMD_MTU_REQUEST_CHANGE:
+        raise ValueError("response is not for MTU_REQUEST_CHANGE")
+    return _int_field(fields, 2)
+
+
+def parse_generic_response_status(payload: bytes, command_id: int) -> int:
+    """Return field 100 from a generic command response."""
+    fields = decode_protobuf(payload)
+    if _int_field(fields, 1) != command_id:
+        raise ValueError(f"response is not for command {command_id}")
+    return _int_field(fields, 100)
+
+
+def parse_binding_status_response(payload: bytes) -> bool:
+    """Parse command 16's nested application-binding status flag."""
+    fields = decode_protobuf(payload)
+    if _int_field(fields, 1) != CMD_INQUIRY_BINDING_STATUS:
+        raise ValueError("response is not for INQUIRY_BINDING_STATUS")
+    status = decode_protobuf(_bytes_field(fields, 3))
+    return bool(_int_field(status, 1))
+
+
 def encode_time(year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0) -> bytes:
     """Build the 6-varint-field `time` submessage used throughout the fitness-data protocol."""
     return (
@@ -281,16 +306,17 @@ def encode_system_notification_request(
 ) -> bytes:
     """Build a SEND_SYSTEM_NOTIFICATION (178) request.
 
-    Not reverse-engineered from a capture (no notification was ever sent in
-    any session) -- instead the app's own real bytecode was decompiled
+    The wire shape was recovered from the app's own bytecode
     (`com.zhapp.ble.a`, the "Apricot" protocol branch --
     `com.zhapp.ble.ControlBleTools.sendSystemNotification` -- see
     ../../android-observations.md) and invoked directly in a small JVM
-    harness with the real protobuf runtime, so these bytes are exactly what
-    the official app would send, not a guess: `{1: 178, 13: {1: {1: type,
+    harness with the real protobuf runtime, so these bytes match what the
+    official app sends: `{1: 178, 13: {1: {1: type,
     2: phoneNumber, 3: contactsInfo, 4: messageText}}}`. For
     `NOTIFICATION_TYPE_CALL`, the app itself always forces `messageText` to
-    `""` regardless of what's passed -- replicated here for parity.
+    `""` regardless of what's passed -- replicated here for parity. Type
+    `NOTIFICATION_TYPE_MESSAGE` is also verified live: with a valid binding
+    and ATT MTU 247, it displays contacts and text transiently.
     """
     if notification_type == NOTIFICATION_TYPE_CALL:
         message_text = ""

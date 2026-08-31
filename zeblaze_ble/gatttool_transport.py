@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import dataclass
 
 from . import protocol
 
@@ -38,6 +39,17 @@ class HeartRateUnavailableError(RuntimeError):
 
 class GattOperationError(RuntimeError):
     """Raised when gatttool reports an explicit `Error: ...` ATT response."""
+
+
+@dataclass(frozen=True)
+class BindOutcome:
+    """Responses from a completed minimal application bind."""
+
+    mtu: int
+    binding_check_response: bytes
+    binding_result_response: bytes
+    binding_status_response: bytes
+    bound: bool
 
 
 async def _disconnect_local_bluez(address: str) -> None:
@@ -469,15 +481,51 @@ async def request_current_heart_rate(address: str, seconds: float = 30, attempts
     ) from last_error
 
 
-# The user id this watch is bound to, pulled from the phone's own
-# info_fit.xml (USER_ID) during the 2026-08-29 session -- see
-# android-observations.md. Not a secret (it's the account's own numeric
-# id, sent in cleartext by the real app on every connect), but specific to
-# this one watch/account pairing. Kept for reference even though the
-# VERIFY_USER_NUMBER prelude that used it was removed from the
-# notification senders (2026-08-30): live testing showed it changes
-# neither the ack nor the watch's display behavior.
-_BOUND_USER_ID = "2011999"
+async def bind_watch(
+    address: str,
+    user_id: str,
+    phone_type: int = protocol.PHONE_TYPE_ANDROID,
+) -> BindOutcome:
+    """Perform the verified minimal application-binding sequence.
+
+    This deliberately sends no time, language, clock-format, real-time-data,
+    Classic Bluetooth, or HFP setup. Binding is accepted only when command 0
+    confirms MTU 247, command 18 succeeds, and command 16 reports bound.
+    """
+    if not user_id:
+        raise ValueError("user_id must not be empty")
+
+    async with GatttoolSession(address, att_mtu=247) as session:
+        await session.send_message(protocol.encode_mtu_request_change())
+        mtu_response = await session.receive_message()
+        mtu = protocol.parse_mtu_response(mtu_response)
+        if mtu != 247:
+            raise RuntimeError(f"watch confirmed ATT MTU {mtu}, expected 247")
+
+        await session.send_message(protocol.encode_binding_check_request())
+        binding_check_response = await session.receive_message()
+
+        await session.send_message(protocol.encode_binding_result_request(user_id, phone_type))
+        binding_result_response = await session.receive_message()
+        result_status = protocol.parse_generic_response_status(
+            binding_result_response, protocol.CMD_BINDING_RESULT
+        )
+        if result_status != 0:
+            raise RuntimeError(f"binding result failed with status {result_status}")
+
+        await session.send_message(protocol.encode_request(protocol.CMD_INQUIRY_BINDING_STATUS))
+        binding_status_response = await session.receive_message()
+        bound = protocol.parse_binding_status_response(binding_status_response)
+        if not bound:
+            raise RuntimeError("watch accepted command 18 but still reports unbound")
+
+    return BindOutcome(
+        mtu=mtu,
+        binding_check_response=binding_check_response,
+        binding_result_response=binding_result_response,
+        binding_status_response=binding_status_response,
+        bound=bound,
+    )
 
 
 async def send_notification(
@@ -490,18 +538,10 @@ async def send_notification(
 ) -> bytes:
     """Connect and push a SEND_SYSTEM_NOTIFICATION (178) to the watch.
 
-    Live-tested 2026-08-29/30: the watch acks every 178 write with
-    `{1: 178, 100: 0}` regardless of which precondition commands (if any)
-    precede it, and never reliably displayed the content over a BLE-only
-    link -- see TODO.md's "notify" entry. The former `warmup` parameter
-    (VERIFY_USER_NUMBER / INQUIRY_BINDING_STATUS / GET_DEVICE_INFO preludes)
-    was removed 2026-08-30: it changed nothing observable and each extra
-    prelude command was itself a source of the pre-existing ack flakiness.
-
-    Returns the notification's response payload (the generic ack/error-code
-    shape documented in protocol.md, `{1: 178, 100: <code>}`) for the caller
-    to inspect/log -- this command was never seen live, only reconstructed
-    from the app's own bytecode, so nothing about its response is assumed.
+    A valid application binding is required for display. Type `message`
+    renders `contacts_info` and `message_text` as a transient system
+    notification. Returns the generic response payload
+    `{1: 178, 100: <code>}`.
 
     Retries transient `TimeoutError`/`ConnectionError` up to `attempts`
     times, 5s apart.
@@ -509,7 +549,7 @@ async def send_notification(
     last_error: Exception | None = None
     for _ in range(max(1, attempts)):
         try:
-            async with GatttoolSession(address) as session:
+            async with GatttoolSession(address, att_mtu=247) as session:
                 await session.send_message(
                     protocol.encode_system_notification_request(
                         notification_type, phone_number, contacts_info, message_text

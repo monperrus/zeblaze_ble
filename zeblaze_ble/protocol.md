@@ -17,8 +17,12 @@ All five characteristics support `WRITE_NO_RESPONSE | NOTIFY`:
 | `16186f04-0000-1000-8000-00807f9b34fb` | `DATA_UPLOAD` | `0x002a` | `0x002b` | Reserved/unknown |
 | `16186f05-0000-1000-8000-00807f9b34fb` | `CHANNEL_6F05` | `0x002d` | `0x002e` | Reserved/unknown |
 
-Enable notifications on all five CCCDs when opening a protocol session.
-These handles apply to firmware `1.1.2`.
+Writing `01 00` to a characteristic's Client Characteristic Configuration
+Descriptor (CCCD) enables notifications from that characteristic for the
+current connection. `6f02` notifications carry transport acknowledgements;
+`6f01` notifications carry command responses and watch-originated messages.
+The other three subscriptions are needed only for traffic assigned to their
+respective channels. These handles apply to firmware `1.1.2`.
 
 ## Session initialization and MTU
 
@@ -27,7 +31,8 @@ exchange:
 
 1. Connect over LE.
 2. Complete ATT Exchange MTU with MTU 247.
-3. Enable all five notification CCCDs.
+3. Enable at least the `6f01` and `6f02` notification CCCDs for bidirectional
+   command transport.
 4. Send command 0:
 
 ```text
@@ -153,15 +158,17 @@ identifier is an ASCII decimal string, not a cryptographic credential.
 
 ### Binding sequence
 
-Use one uninterrupted BLE session:
+The minimal binding sequence uses one uninterrupted BLE session:
 
 1. Negotiate ATT MTU 247 and send command 0.
-2. Query command 16. Continue only if it reports unbound.
-3. Send command 17 and receive the watch identity.
-4. Send command 18 with bind result `SUCCESS`, user ID, and phone type.
-5. Send initialization commands 48, 65, 49, and 164.
-6. Process watch-originated messages until command 27 arrives.
-7. Query command 16 and command 19 to confirm the binding.
+2. Send command 17 and receive the watch identity.
+3. Send command 18 with bind result `SUCCESS`, user ID, and phone type.
+4. Query command 16; binding is complete when it reports true.
+
+Commands 48, 65, 49, and 164 are post-bind device initialization, not
+binding prerequisites. Command 27 and command 19 are also not required to
+commit the binding. Command 19 may be used for the stronger check that the
+stored user identifier matches.
 
 ### Binding status: command 16
 
@@ -212,8 +219,8 @@ Shape:
 }
 ```
 
-The immediate response is generic success. Binding is complete only after
-command 16 reports true and command 19 verifies the user.
+The immediate response is generic success. Binding is complete when command
+16 reports true; command 19 can additionally verify the user identifier.
 `protocol.encode_binding_result_request(user_id)` builds the request.
 
 ### Initialization commands
@@ -238,7 +245,7 @@ Command 27 is watch-originated and carries classic-radio state:
 ```
 
 Do not synthesize command 27 from the host. Receive and acknowledge it using
-the normal chunked transport, then query commands 16 and 19.
+the normal chunked transport when it is emitted.
 
 ### User verification: command 19
 
@@ -394,6 +401,10 @@ Types:
 | 2 | Message |
 
 `protocol.encode_system_notification_request()` implements this shape.
+With a valid application binding and ATT MTU 247, type 2 displays
+`contacts_info` and `message_text` as a transient system notification and
+returns generic success. It disappears automatically rather than remaining
+in the watch UI. The on-watch behavior of types 0 and 1 is not yet verified.
 
 ## Event reminders
 

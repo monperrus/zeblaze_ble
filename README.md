@@ -38,6 +38,20 @@ zeblaze-ble listen <ADDRESS> --seconds 90 --output capture.jsonl
 A passive capture may remain empty until a verified, read-only history request
 is implemented; no command bytes are guessed here.
 
+### Application binding
+
+```bash
+zeblaze-ble bind <ADDRESS> --user-id <ACCOUNT_ID> --i-understand-this-writes
+```
+
+Performs the minimal application bind in one connection: ATT MTU 247, SDK
+MTU command 0, binding check 17, binding result 18, and binding-status query
+16. `--user-id` is the application account identifier that will be stored on
+the watch. Use `--phone-type ios` when binding for an iOS identity; Android is
+the default. The command succeeds only when the watch confirms MTU 247,
+accepts command 18, and reports itself bound. It does not send time, language,
+clock-format, real-time telemetry, Classic Bluetooth, or HFP setup commands.
+
 ### Current heart rate
 
 ```bash
@@ -186,13 +200,12 @@ zeblaze-ble notify <ADDRESS> --type miss_call --phone "+1234567890" --sender "Al
 
 Sends `SEND_SYSTEM_NOTIFICATION` (command id 178).
 
-**Known limitation, confirmed live, unresolved**: the watch acks this
-command as successful every time, but a bare connection's notification is
-not reliably displayed — the watch shows a fixed system prompt instead
-("please connect the BT in the phone's setting"). A `--warmup` prelude
-(`VERIFY_USER_NUMBER` etc., matching the real app's connect sequence) was
-tried and removed 2026-08-30: it changed neither the ack nor the display.
-For text notifications that actually display, use `app-notify` below.
+The watch must already have a valid application binding. The CLI negotiates
+ATT MTU 247 before sending. Type `message` displays `--sender` and `--text`
+as a transient system notification: it disappears automatically rather than
+remaining in the watch UI. The on-watch behavior of `call` and `miss_call`
+has not yet been confirmed. Use `app-notify` for notifications that need an
+application label and Android package identity.
 
 ### App-style notifications (WhatsApp/Slack-like)
 
