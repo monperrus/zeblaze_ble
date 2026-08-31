@@ -730,6 +730,18 @@ discarded the new payloads — the watch was in a user-id-mismatch bind state
 at the time (see "Binding" below), which has since been repaired. So the
 ack proves delivery to the watch's protocol layer only.
 
+Re-tested 2026-08-31, BLE-only, after the `pageName` fix: a 179 carrying
+the *captured working frame's own* field values (appName `Gmail`,
+pageName `com.google.android.gm`, tickerText = title, only the body text
+changed) was acked `08 b3 01 a0 06 00` and still did not display -- the
+watch kept showing the same stale cached banner. A populated `pageName` is
+therefore **not** what makes the watch display a notification, and neither
+is bind state (see "Binding" below, where 16/19 were queried in the same
+session and both came back healthy). The ack-vs-display gap is unexplained;
+the remaining documented difference between this tool and the phone is the
+link itself -- the phone's LE link is bonded and encrypted and it holds a
+classic HFP link, this tool's is neither (see "Link security" below).
+
 An earlier note claimed the watch draws its body line from tickerText and
 falls back to the title; that was an artifact of the stale-banner session
 above, and is retracted — the field mapping in the table above supersedes
@@ -838,8 +850,21 @@ Bind sequence the real app runs:
 `{7: {1: 0, 2: 1}}` = `verifyResult{verify_result_type: false,
 binding_status: true}` (SEBindAccount.verifyResult = field 7,
 SEVerifyResult: verifyResultType = 1, bindingStatus = 2). While
-`verify_result_type` is false the watch is in the user-id-mismatch state:
-commands still ack, but pushes are not displayed.
+`verify_result_type` is false the watch is in the user-id-mismatch state.
+
+**A healthy bind is not sufficient for display** (measured 2026-08-31,
+BLE-only from this tool, minutes after a 179 that acked and did not
+display):
+
+- `INQUIRY_BINDING_STATUS` (16) → `08 10 1a 02 08 01` =
+  `{1: 16, 3: {1: 1}}`, `request_binding_status: true`.
+- `VERIFY_USER_NUMBER` (19) → `08 13 1a 06 3a 04 08 01 10 01` =
+  `{1: 19, 3: {7: {1: 1, 2: 1}}}` = `verifyResult{verify_result_type: true,
+  binding_status: true}` — note the `08 01`, the opposite of the
+  mismatch reply's `08 00` above.
+
+So the bind is intact and verified, and the watch still acked a 179 it did
+not show. Bind state alone does not gate display.
 
 **Not yet live-tested from this tool**: sending 17/18 ourselves to repair
 a broken bind over BLE-only (the 2026-08-30 attempt was blocked by the
