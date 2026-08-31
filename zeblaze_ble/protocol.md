@@ -847,13 +847,41 @@ host's adapter going away mid-session). The exact bytes above are
 reproducible with `protocol.encode_field_varint`/`encode_field_bytes`;
 dedicated encoders are a natural next addition once tested.
 
-## No encryption, no pairing
+## Link security: no application-layer crypto; encryption is the peer's choice
 
-There is no **zero SMP packets** and zero LE-encryption events for
-an entire bind + sync session. The link is unpaired and unencrypted at the
-BLE level throughout. There is no secret key, no nonce exchange, no HMAC, no
-AES-CCM anywhere.
+There is **no application-layer cryptography anywhere in this protocol**: no
+secret key, no nonce exchange, no HMAC, no AES-CCM. Every payload documented
+above is plain protobuf. Confidentiality, if any, comes entirely from BLE
+link-layer encryption, which is a property of the *peer*, not of the watch's
+protocol:
 
+- **This repo's Linux client**: connects and exchanges the full protobuf
+  protocol — reads fitness data, writes notifications — with **no pairing
+  and no encryption at all**. The watch does not require an encrypted link
+  for the `1618` service's characteristics.
+- **The official Android app** (`btsnoop`, 2026-08-31 06:28): pairs with
+  **LE Secure Connections** (`Pairing Public Key` / `DHKey Check` exchange,
+  i.e. ECDH P-256, max key size 16) and the LE link is then encrypted —
+  `HCI Encryption Change status=0 enabled=1` on the LE ACL handle, 12
+  seconds before the first protobuf byte. The classic HFP link is encrypted
+  too (`Authentication Complete`, then `Encryption Change` on the BR/EDR
+  handle).
+
+  The association model is **Just Works**, and therefore unauthenticated:
+  initiator IO capability `0x04` (KeyboardDisplay), responder `0x03`
+  (NoInputNoOutput), and the responder clears the MITM bit in its AuthReq
+  (`0x29`; the initiator sets it, `0x2d`). Both sides set the SC bit.
+
+  There is also a short unencrypted window at the start of each connection —
+  ATT traffic begins ~12 s before `Encryption Change` — but in the capture it
+  carries only GATT discovery, no protocol payload.
+
+An earlier revision of this section claimed "zero SMP packets ... unpaired
+and unencrypted throughout", generalising from the 2026-08-29 capture. That
+is **retracted**: it was true of that session's link state, not of the
+protocol. Note also that an Android `btsnoop_hci.log` records HCI traffic,
+which is *above* the controller's link-layer encryption — plaintext in a
+snoop log is never evidence of plaintext over the air.
 
 ## What isn't known yet
 
