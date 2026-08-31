@@ -904,12 +904,27 @@ address to connect to — byte-for-byte the same status the watch pushes as
 27. So the watch tracks, and volunteers, whether it currently has a classic
 link, and this tool has never given it one.
 
+Field 1 is confirmed to toggle: the 2026-08-31 capture
+(`scratch/notif-capture/BLE_2026-08-31.b.zh`) contains exactly two
+watch-pushed 27s, differing in that byte alone —
+
+```
+06:25:54.070  08 1B 1A 19 42 17 08 00 10 01 1A 11 <mac>   connect_status: false
+06:28:11.089  08 1B 1A 19 42 17 08 01 10 01 1A 11 <mac>   connect_status: true
+```
+
+— the `false` one 1.7s after `Pairing failed device = ... BondState:10`,
+the `true` one once pairing had succeeded. It stays true for the rest of
+the session, and the 179 that displayed went out at 07:39:21, 71 minutes
+inside that window.
+
 That makes 25 a direct read-out of the variable the standing
 notification-display hypothesis is about (see `TODO.md`): every 179 that
 acked without displaying was sent while this query returns
 `connect_status: false`, and the one 179 known to have displayed was sent
-by a phone holding a live classic HFP link. Correlation only — not yet a
-demonstrated cause.
+with it true. Correlation only — not yet a demonstrated cause, and
+untestable from this host alone, since flipping it requires a phone to
+bring the classic link up.
 
 ## Link security: no application-layer crypto; encryption is the peer's choice
 
