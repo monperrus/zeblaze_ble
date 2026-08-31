@@ -8,6 +8,8 @@ vendor app itself displayed for the same bytes.
 
 from __future__ import annotations
 
+import pytest
+
 from zeblaze_ble import protocol
 
 # function_type 1, night of 2026-08-30.
@@ -94,3 +96,44 @@ def test_parse_continuous_heart_rate_is_one_byte_per_bucket() -> None:
     assert [(index, value) for index, value in enumerate(heart_rate.heart_rate) if value] == [(64, 60)]
     assert (heart_rate.max_value, heart_rate.min_value) == (60, 60)
     assert (len(heart_rate.hour_max), len(heart_rate.hour_min)) == (24, 24)
+
+
+# The exact SEND_APP_NOTIFICATION (179) payload the official app put on the wire
+# on 2026-08-31 at 07:39:21 for a Gmail notification the watch then displayed
+# correctly -- lifted from its BLE debug log (`PROTOBUF_02 write`, chunk header
+# `01 00` stripped) and confirmed byte-for-byte against the HCI snoop of the
+# same write. This is the only known-good 179 frame, so it pins the encoder.
+APP_NOTIFICATION_FRAME = bytes.fromhex(
+    "08b3016a5f125d0a05476d61696c1215636f6d2e676f6f676c652e616e64726f69642e676d1a10"
+    "4d617274696e204d6f6e706572727573221968656c6c6f206d617274696e20686f772061726520"
+    "796f753f2a104d617274696e204d6f6e706572727573"
+)
+
+
+def test_encode_app_notification_matches_the_captured_working_frame() -> None:
+    assert (
+        protocol.encode_app_notification_request(
+            "Gmail",
+            "com.google.android.gm",
+            "Martin Monperrus",
+            "hello martin how are you?",
+            "Martin Monperrus",
+        )
+        == APP_NOTIFICATION_FRAME
+    )
+
+
+def test_encode_app_notification_rejects_an_empty_page_name() -> None:
+    # The watch identifies a notification's source by its Android package name;
+    # the real app never sends an empty one, so neither may we.
+    with pytest.raises(ValueError):
+        protocol.encode_app_notification_request("Gmail", "", "Martin", "hello", "Martin")
+
+
+def test_encode_app_notification_does_not_truncate_app_or_page_name() -> None:
+    # ControlBleTools.sendAppNotification truncates only title/text/ticker.
+    package = "com.example." + "x" * 80
+    encoded = protocol.encode_app_notification_request("A" * 80, package, "t", "b", "k")
+    assert package.encode("utf-8") in encoded
+    assert ("A" * 80).encode("utf-8") in encoded
+    assert b"..." not in encoded

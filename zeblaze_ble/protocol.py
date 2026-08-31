@@ -53,6 +53,8 @@ CMD_SEND_APP_NOTIFICATION = 179
 # Field-length caps the official app itself applies before sending an app
 # notification (ControlBleTools.sendAppNotification -> BleUtils.truncateString):
 # title/ticker capped at 50, text at 200 (result is 49/199 chars + "...").
+# appName and pageName are passed through uncapped -- the smali truncates only
+# its p3/p4/p5 (title/text/ticker) arguments.
 APP_NOTIFICATION_TITLE_MAX = 50
 APP_NOTIFICATION_TEXT_MAX = 200
 
@@ -229,20 +231,42 @@ def encode_app_notification_request(
 ) -> bytes:
     """Build a SEND_APP_NOTIFICATION (179) request.
 
-    Same provenance as `encode_system_notification_request` -- recovered by
-    reading the decompiled app (`com.zhapp.ble.a.a(int, String, String,
-    String, String, String)`, "Apricot" branch of
-    `ControlBleTools.sendAppNotification`) rather than from a live capture:
     `{1: 179, 13: {2: {1: appName, 2: pageName, 3: title, 4: text,
     5: tickerText}}}` (SENotification.appNotification = field 2, versus
-    systemNotification = field 1). The app itself caps title/ticker at 50
-    chars and text at 200 (truncating to max-1 chars and appending "..."),
-    which this replicates exactly -- see ControlBleTools.sendAppNotification
-    and BleUtils.truncateString in the decompiled smali.
+    systemNotification = field 1). Verified byte-for-byte against a real
+    app notification captured 2026-08-31 that the watch displayed correctly
+    -- see protocol.md's "App push notification" section for those bytes.
+
+    Where each field comes from in the real app
+    (`MyNotificationsService.onNotificationPosted` -> `sendAppNotification`):
+
+    - `page_name` is the *Android package name* of the app that posted the
+      notification (`StatusBarNotification.getPackageName()`), e.g.
+      `com.google.android.gm`. It is never empty in a real send, and it is
+      the value the app derives everything else from, so an empty
+      `page_name` is rejected here rather than silently sent -- see the
+      note in protocol.md about what the watch does with an unidentifiable
+      source.
+    - `app_name` is that package's human-readable label
+      (`AppUtils.getAppName(page_name)`), e.g. `Gmail`.
+    - `title`/`text` are the notification's `android.title`/`android.text`
+      extras; `ticker_text` is `Notification.tickerText`, which is a short
+      sender/summary line -- in the captured send it equalled the title,
+      *not* the body.
+
+    `ControlBleTools.sendAppNotification` caps title/ticker at 50 chars and
+    text at 200 (truncating to max-1 chars and appending "...") and applies
+    no cap at all to appName/pageName -- replicated exactly here.
     """
+    if not page_name:
+        raise ValueError(
+            "page_name is required: it is the sending app's Android package name "
+            "(e.g. 'com.google.android.gm'), which the watch uses to identify the "
+            "notification's source; the real app never sends it empty"
+        )
     app_notification = (
-        encode_field_bytes(1, _truncate_string(app_name, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
-        + encode_field_bytes(2, _truncate_string(page_name, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
+        encode_field_bytes(1, app_name.encode("utf-8"))
+        + encode_field_bytes(2, page_name.encode("utf-8"))
         + encode_field_bytes(3, _truncate_string(title, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))
         + encode_field_bytes(4, _truncate_string(text, APP_NOTIFICATION_TEXT_MAX).encode("utf-8"))
         + encode_field_bytes(5, _truncate_string(ticker_text, APP_NOTIFICATION_TITLE_MAX).encode("utf-8"))

@@ -669,29 +669,71 @@ in `bluetooth-problems.md`.
 Structure: `{1: 179, 13: {2: {1: appName, 2: pageName, 3: title, 4: text,
 5: tickerText}}}` — the same `SEWear` envelope and field 13 as 178, but
 holding `SENotification{2: SEAppNotification{...}}` (appNotification is
-field 2 of `SENotification`; systemNotification is field 1). The app
-truncates title/ticker at 50 chars and text at 200
-(`BleUtils.truncateString`: `s[:max-1] + "..."`), which
-`protocol.encode_app_notification_request` replicates byte-for-byte.
-Recovered from the decompiled APK (`ControlBleTools.sendAppNotification`
--> `com.zhapp.ble.a.a(179, ...)`) — the command the real app itself uses
-for every third-party notification.
+field 2 of `SENotification`; systemNotification is field 1). This is the
+command the real app uses for every third-party notification.
 
-Live-tested 2026-08-30, BLE-only: acked `{1: 179, 100: 0}`
-(`08 b3 01 a0 06 00`) with **no** precondition commands, including
-multi-chunk payloads (~226 bytes → 2 chunks). **Ack ≠ display**: during
-the same session, every 179 was acked success while the watch showed one
-stale cached banner and discarded the new payloads — because the watch was
-in a user-id-mismatch bind state at the time (see "Binding" below). So the
-ack proves delivery to the watch's protocol layer only, and whether the
-watch *displays* the push is gated on a valid bind. Unlike 178, 179 was
-observed displaying real content once (the very first, pre-mismatch send).
+**Ground truth (2026-08-31, 07:39:21):** a Gmail notification the watch
+displayed correctly, captured in the app's own BLE debug log and confirmed
+byte-for-byte in the HCI snoop of the same write:
+
+```
+01 00 08 b3 01 6a 5f 12 5d
+  0a 05 "Gmail"
+  12 15 "com.google.android.gm"
+  1a 10 "Martin Monperrus"
+  22 19 "hello martin how are you?"
+  2a 10 "Martin Monperrus"
+```
+
+(`01 00` is the data-chunk header; the frame is a single chunk, sent on
+`6f02` after the usual `00 00 00 00 01 00` header / `00 00 01 01 00 00`
+ready-ack handshake, and acked with `08 b3 01 a0 06 00` arriving on
+`6f01`. No precondition command of any kind precedes it in the capture.)
+`tests/test_protocol.py` pins `encode_app_notification_request` to these
+exact bytes.
+
+### Where each field comes from, and why `pageName` matters
+
+`MyNotificationsService.onNotificationPosted` fills the five strings from
+one Android `StatusBarNotification`:
+
+| field | source |
+|---|---|
+| `pageName` | `StatusBarNotification.getPackageName()` — e.g. `com.google.android.gm` |
+| `appName` | `AppUtils.getAppName(pageName)` — the package's display label, e.g. `Gmail` |
+| `title` | the `android.title` extra |
+| `text` | the `android.text` extra |
+| `tickerText` | `Notification.tickerText` — Android's short summary line |
+
+So `pageName` is the **package name, and the root the app derives `appName`
+from**; it is structurally never empty in a real send. An earlier note here
+called it "unused by the app for third-party notifications" — that was
+wrong, and it was the one field this repo's `app-notify` always sent empty.
+`encode_app_notification_request` now rejects an empty `page_name`.
+
+Note also that in the working capture `tickerText` equals the **title**
+(the sender name), not the body — Android's ticker is a summary line, not
+the message. The CLI's `--ticker` therefore defaults to `--sender`.
+
+`ControlBleTools.sendAppNotification` truncates title/ticker at 50 chars
+and text at 200 (`s[:max-1] + "..."`, `BleUtils.truncateString`) and applies
+**no** cap to appName/pageName — its smali truncates only its p3/p4/p5
+arguments. `protocol.py` replicates that exactly.
+
+### Prior live tests, and what they were actually showing
+
+Live-tested 2026-08-30, BLE-only: every 179 was acked `{1: 179, 100: 0}`
+(`08 b3 01 a0 06 00`) with no precondition commands, including multi-chunk
+payloads (~226 bytes → 2 chunks). **Ack ≠ display**: during that session
+every 179 was acked while the watch showed one stale cached banner and
+discarded the new payloads — the watch was in a user-id-mismatch bind state
+at the time (see "Binding" below), which has since been repaired. So the
+ack proves delivery to the watch's protocol layer only.
 
 An earlier note claimed the watch draws its body line from tickerText and
 falls back to the title; that was an artifact of the stale-banner session
-above, not a real rule, and has been retracted. The CLI's
-`--ticker`-defaults-to-`--text` behavior was kept (harmless, matches the
-real app, which always has a ticker from Android).
+above, and is retracted — the field mapping in the table above supersedes
+it.
 
 ## Event reminders: `SET_EVENT_INFO_LIST` (212) / `GET_EVENT_INFO_LIST` (211)
 

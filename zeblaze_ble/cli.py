@@ -108,15 +108,27 @@ def parser() -> argparse.ArgumentParser:
         help="push an app-style notification (like WhatsApp/Slack) to the watch (performs a protocol write)",
     )
     app_notify_command.add_argument("address")
-    app_notify_command.add_argument("--app", default="Messages", help="appName shown on the watch")
+    app_notify_command.add_argument(
+        "--app",
+        default="Messages",
+        help="appName: the source app's display label, as shown on the watch (default: Messages)",
+    )
     app_notify_command.add_argument("--sender", default="", help="title: sender/title line shown on the watch")
     app_notify_command.add_argument("--text", default="", help="text: body text")
     app_notify_command.add_argument(
         "--ticker",
         default=None,
-        help="tickerText: what the watch draws as the body line (default: same as --text)",
+        help="tickerText: Android's short summary line for the notification (default: same as --sender)",
     )
-    app_notify_command.add_argument("--page", default="", help="pageName (unused by the app for third-party notifications)")
+    app_notify_command.add_argument(
+        "--page",
+        default="com.google.android.apps.messaging",
+        help=(
+            "pageName: the source app's Android package name, which the watch uses to "
+            "identify where the notification came from. Must correspond to --app; the "
+            "default pairs with --app's default. Never send it empty."
+        ),
+    )
     app_notify_command.add_argument("--attempts", type=int, default=8, help="retries for flaky BLE (default: 8)")
     app_notify_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     daily_command = commands.add_parser(
@@ -258,10 +270,12 @@ async def run(arguments: argparse.Namespace) -> int:
         return 0
 
     if arguments.command == "app-notify":
-        # The watch renders its body line from tickerText and falls back to
-        # the title when it is empty -- so never send an empty ticker; the
-        # real app always has one (Android's ticker is "sender: message").
-        ticker_text = arguments.ticker if arguments.ticker is not None else arguments.text
+        # tickerText is Android's Notification.tickerText: a short summary
+        # line, which in the one captured send the watch displayed correctly
+        # was the sender name -- the same string as the title, not the body.
+        # (An earlier "the watch draws its body from tickerText" theory was an
+        # artifact of a stale banner and is retracted; see protocol.md.)
+        ticker_text = arguments.ticker if arguments.ticker is not None else arguments.sender
         response = await send_app_notification(
             arguments.address,
             arguments.app,
