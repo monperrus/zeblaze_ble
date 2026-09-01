@@ -206,7 +206,7 @@ async def run(arguments: argparse.Namespace) -> int:
                     "binding_result_response_hex": outcome.binding_result_response.hex(),
                     "binding_status_response_hex": outcome.binding_status_response.hex(),
                     "time_timestamp": outcome.timestamp,
-                    "time_utc_offset_eighth_hours": outcome.utc_offset_eighth_hours,
+                    "time_utc_offset_quarter_hours": outcome.utc_offset_quarter_hours,
                     "time_response_hex": outcome.time_response.hex(),
                     "watch_messages_hex": [message.hex() for message in outcome.watch_messages],
                 },

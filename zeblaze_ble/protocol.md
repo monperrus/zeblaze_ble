@@ -14,8 +14,8 @@ All five characteristics support `WRITE_NO_RESPONSE | NOTIFY`:
 | `16186f01-0000-1000-8000-00807f9b34fb` | `COMMAND_READ` | `0x0021` | `0x0022` | Command responses and watch-originated messages |
 | `16186f02-0000-1000-8000-00807f9b34fb` | `COMMAND_WRITE` | `0x0024` | `0x0025` | Host commands and transport acknowledgements |
 | `16186f03-0000-1000-8000-00807f9b34fb` | `ACTIVITY_DATA` | `0x0027` | `0x0028` | Bulk workout data |
-| `16186f04-0000-1000-8000-00807f9b34fb` | `DATA_UPLOAD` | `0x002a` | `0x002b` | Reserved/unknown |
-| `16186f05-0000-1000-8000-00807f9b34fb` | `CHANNEL_6F05` | `0x002d` | `0x002e` | Reserved/unknown |
+| `16186f04-0000-1000-8000-00807f9b34fb` | `LARGE_FILE_DATA` | `0x002a` | `0x002b` | Binary large-file transfer, including OTA firmware, watch faces, and AGPS/LTO data |
+| `16186f05-0000-1000-8000-00807f9b34fb` | `VOICE_DATA` | `0x002d` | `0x002e` | Voice-assistant/Alexa data |
 
 Writing `01 00` to a characteristic's Client Characteristic Configuration
 Descriptor (CCCD) enables notifications from that characteristic for the
@@ -237,15 +237,15 @@ Command 48 sets the system time:
   5:{
     1:{
       1:unix_timestamp_seconds,
-      2:utc_offset_in_eighth_hours
+      2:utc_offset_in_quarter_hours  # protobuf sint32
     }
   }
 }
 ```
 
-On this firmware the effective offset scale is eight units per hour: CEST
-(`UTC+02:00`) is encoded as 16. This is confirmed both by the official app's
-wire bytes and by the displayed watch time. The standard clock-sync call
+The logical offset uses four units per hour: CEST (`UTC+02:00`) is `+8`.
+Because this is a protobuf `sint32`, zigzag encoding puts the unsigned varint
+value 16 on the wire. The standard clock-sync call
 omits the optional time-format field and thus does not alter the 12/24-hour
 preference. `protocol.encode_set_system_time_request()` implements this
 shape. Command 49 sets the 12/24-hour selection. Command 65 requests the
@@ -682,7 +682,6 @@ HFP.
 
 ## Unknown fields and commands
 
-- The roles of characteristics `6f04` and `6f05` are unknown.
 - The calorie unit in daily fitness data is unknown.
 - Several real-time report fields and hourly arrays are not decoded.
 - The workout point/sample component is not decoded.

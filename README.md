@@ -47,7 +47,9 @@ zeblaze-ble bind <ADDRESS> --user-id <ACCOUNT_ID> --i-understand-this-writes
 Performs the minimal application bind in one connection: ATT MTU 247, SDK
 MTU command 0, binding check 17, binding result 18, and binding-status query
 16. After binding succeeds, it synchronizes the watch clock and UTC offset
-with the host using command 48. `--user-id` is the application account
+with the host using command 48. The offset is a protobuf `sint32` measured in
+quarter-hours; UTC+02:00 is logically `+8` and zigzag-encoded as wire value
+16. `--user-id` is the application account
 identifier that will be stored on the watch. Use `--phone-type ios` when
 binding for an iOS identity; Android is the default. The command succeeds
 only when the watch confirms MTU 247, accepts command 18, reports itself

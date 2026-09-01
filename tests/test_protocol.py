@@ -167,19 +167,19 @@ def test_parse_minimal_binding_responses() -> None:
 
 
 def test_encode_set_system_time_matches_the_official_app_shape() -> None:
-    # {1:48, 5:{1:{1:1700000000, 2:16}}}; CEST is 16 in the captured app frame.
-    assert protocol.encode_set_system_time_request(1_700_000_000, 16) == bytes.fromhex(
+    # Logical CEST offset +8 quarter-hours zigzag-encodes to wire varint 16.
+    assert protocol.encode_set_system_time_request(1_700_000_000, 8) == bytes.fromhex(
         "08302a0a0a080880e2cfaa061010"
     )
 
 
 def test_encode_set_system_time_supports_negative_utc_offsets() -> None:
-    encoded = protocol.encode_set_system_time_request(1_700_000_000, -20)
+    encoded = protocol.encode_set_system_time_request(1_700_000_000, -5)
     fields = protocol.decode_protobuf(encoded)
     system_time = protocol.decode_protobuf(fields[5][0].raw)  # type: ignore[arg-type]
     time_set = protocol.decode_protobuf(system_time[1][0].raw)  # type: ignore[arg-type]
-    # Protobuf int32 negatives are sign-extended to a ten-byte varint.
-    assert time_set[2][0].raw == (1 << 64) - 20
+    # Logical -5 quarter-hours zigzag-encodes to unsigned wire value 9.
+    assert time_set[2][0].raw == 9
 
 
 def test_bind_cli_requires_explicit_user_id_and_write_opt_in() -> None:

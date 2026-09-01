@@ -20,10 +20,13 @@ ZH_SDK_SERVICE = "16186f00-0000-1000-8000-00807f9b34fb"
 COMMAND_READ = "16186f01-0000-1000-8000-00807f9b34fb"
 COMMAND_WRITE = "16186f02-0000-1000-8000-00807f9b34fb"
 ACTIVITY_DATA = "16186f03-0000-1000-8000-00807f9b34fb"
-DATA_UPLOAD = "16186f04-0000-1000-8000-00807f9b34fb"
-CHANNEL_6F05 = "16186f05-0000-1000-8000-00807f9b34fb"
+LARGE_FILE_DATA = "16186f04-0000-1000-8000-00807f9b34fb"
+VOICE_DATA = "16186f05-0000-1000-8000-00807f9b34fb"
+# Backward-compatible names used by early captures of these channels.
+DATA_UPLOAD = LARGE_FILE_DATA
+CHANNEL_6F05 = VOICE_DATA
 
-NOTIFICATION_CHANNELS = (COMMAND_READ, COMMAND_WRITE, ACTIVITY_DATA, DATA_UPLOAD, CHANNEL_6F05)
+NOTIFICATION_CHANNELS = (COMMAND_READ, COMMAND_WRITE, ACTIVITY_DATA, LARGE_FILE_DATA, VOICE_DATA)
 
 # Command ids observed in a live capture of the official app (BLE_2026-08-29.zh).
 CMD_MTU_REQUEST_CHANGE = 0
@@ -136,11 +139,19 @@ def encode_field_varint(field_number: int, value: int) -> bytes:
 
 
 def encode_field_int32(field_number: int, value: int) -> bytes:
-    """Encode a protobuf ``int32`` field, including negative UTC offsets."""
+    """Encode a protobuf ``int32`` field."""
     if not -(1 << 31) <= value < (1 << 31):
         raise ValueError("int32 value out of range")
     encoded_value = value if value >= 0 else (1 << 64) + value
     return encode_varint((field_number << 3) | 0) + encode_varint(encoded_value)
+
+
+def encode_field_sint32(field_number: int, value: int) -> bytes:
+    """Encode a protobuf ``sint32`` field using zigzag encoding."""
+    if not -(1 << 31) <= value < (1 << 31):
+        raise ValueError("sint32 value out of range")
+    zigzag = (value << 1) ^ (value >> 31)
+    return encode_field_varint(field_number, zigzag)
 
 
 def encode_field_bytes(field_number: int, data: bytes) -> bytes:
@@ -219,8 +230,8 @@ def encode_binding_result_request(user_id: str, phone_type: int = PHONE_TYPE_AND
     return encode_field_varint(1, CMD_BINDING_RESULT) + encode_field_bytes(3, bind_account)
 
 
-def encode_set_system_time_request(timestamp: int, utc_offset_eighth_hours: int) -> bytes:
-    """Build command 48 using Unix seconds and UTC offset in eighth-hours.
+def encode_set_system_time_request(timestamp: int, utc_offset_quarter_hours: int) -> bytes:
+    """Build command 48 using Unix seconds and UTC offset in quarter-hours.
 
     This matches ``ControlBleTools.setSystemTime(long)``: its optional
     ``time_format`` field is omitted, so synchronizing the clock does not
@@ -228,9 +239,9 @@ def encode_set_system_time_request(timestamp: int, utc_offset_eighth_hours: int)
     """
     if not 0 <= timestamp < (1 << 31):
         raise ValueError("timestamp must fit a positive protobuf int32")
-    if not -96 <= utc_offset_eighth_hours <= 112:
+    if not -48 <= utc_offset_quarter_hours <= 56:
         raise ValueError("UTC offset must be between -12:00 and +14:00")
-    time_set = encode_field_varint(1, timestamp) + encode_field_int32(2, utc_offset_eighth_hours)
+    time_set = encode_field_varint(1, timestamp) + encode_field_sint32(2, utc_offset_quarter_hours)
     system_time = encode_field_bytes(1, time_set)
     return encode_field_varint(1, CMD_SET_SYSTEM_TIME) + encode_field_bytes(5, system_time)
 
