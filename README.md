@@ -82,12 +82,10 @@ zeblaze-ble battery <ADDRESS> --i-understand-this-writes
 
 Sends `GET_DEVICE_INFO` (command id 32) and prints firmware version, MAC,
 serial number, and battery status. It is gated behind the explicit
-`--i-understand-this-writes` flag, justified because the command and its
-framing come from a verified live capture of the official app's own traffic
-rather than a guess. Full protocol details (wire framing, command ids,
+`--i-understand-this-writes` flag. Full protocol details (wire framing, command ids,
 message layout): `zeblaze_ble/protocol.md`.
 
-Live example (2026-08-29):
+Example:
 
 ```json
 {
@@ -102,9 +100,8 @@ Live example (2026-08-29):
 
 On Linux this goes through `gatttool -I` rather than `bleak`/BlueZ D-Bus:
 `bleak`'s service resolution has proven unreliable for this watch on this
-stack. A `bleak`-based reference implementation of the same protocol also exists in `transport.py` (matches
-the official app's wire bytes byte-for-byte against two independent live
-captures) but isn't wired into the CLI because of reliability.
+stack. A `bleak`-based reference implementation of the same protocol also exists in `transport.py`
+but isn't wired into the CLI because of reliability.
 
 ### Fitness data
 
@@ -163,7 +160,7 @@ Fetches only the sleep buckets — one per recorded night, listed under the
 date the night started on. Each night gives the summary the watch itself
 computes plus the full stage timeline.
 
-Live example (night of 2026-08-30, abridged):
+Example:
 
 ```json
 [
@@ -230,21 +227,7 @@ app itself uses for every third-party notification, recovered from the
 decompiled APK (`ControlBleTools.sendAppNotification`). Takes `--app`
 (appName), `--sender` (title), `--text` (body), `--ticker` (tickerText,
 defaults to `--sender`), `--page` (pageName), and `--attempts` (default 8,
-for the same BLE ack flakiness every write command shares). No
-precondition commands are sent — live testing showed they're not needed.
-
-Live-tested 2026-08-30: acked with the protocol success code every time,
-including multi-chunk payloads. **Caveat, learned the hard way**: ack !=
-display. While the watch was in a user-id-mismatch bind state it acked
-every 179 but showed one stale cached banner and discarded the new
-payloads (the "K: K" that never changed, which contained no K in the sent
-bytes at all). Display is gated on a valid bind. The binding sequence was
-successfully reproduced on Linux after negotiating ATT MTU 247 and sending
-the SDK-level command 0 before 16/17/18; see protocol.md's "Successful Linux
-application bind" section. Once bound, command 179 displays in full over a
-BLE-only link with no Classic Bluetooth or HFP service connected.
-The title/ticker are capped at 50 chars and the text at 200 by the
-encoder, exactly as the official app caps them.
+for the same BLE ack flakiness every write command shares).
 
 ### Workout data: steps, GPS track, heart rate
 
