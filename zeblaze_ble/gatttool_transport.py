@@ -25,10 +25,10 @@ _WRITE_VALUE_HANDLE = 0x0024  # 16186f02 characteristic value
 _WRITE_CCCD_HANDLE = 0x0025
 _ACTIVITY_VALUE_HANDLE = 0x0027  # 16186f03 characteristic value -- bulk data (e.g. GPS tracks), see protocol.md
 _ACTIVITY_CCCD_HANDLE = 0x0028
-_DATA_UPLOAD_VALUE_HANDLE = 0x002A  # 16186f04 characteristic value
-_DATA_UPLOAD_CCCD_HANDLE = 0x002B
-_CHANNEL_6F05_VALUE_HANDLE = 0x002D
-_CHANNEL_6F05_CCCD_HANDLE = 0x002E
+_LARGE_FILE_VALUE_HANDLE = 0x002A  # 16186f04 characteristic value
+_LARGE_FILE_CCCD_HANDLE = 0x002B
+_VOICE_DATA_VALUE_HANDLE = 0x002D  # 16186f05 characteristic value
+_VOICE_DATA_CCCD_HANDLE = 0x002E
 
 _NOTIFICATION_RE = re.compile(r"Notification handle = 0x([0-9a-fA-F]+) value: ([0-9a-fA-F ]+)")
 _PROMPT_TIMEOUT_SECONDS = 15.0
@@ -53,7 +53,7 @@ class BindOutcome:
     binding_status_response: bytes
     bound: bool
     timestamp: int
-    utc_offset_eighth_hours: int
+    utc_offset_quarter_hours: int
     time_response: bytes
     watch_messages: tuple[bytes, ...]
 
@@ -138,8 +138,8 @@ class GatttoolSession:
             await self._enable_notifications(_READ_CCCD_HANDLE)
             await self._enable_notifications(_WRITE_CCCD_HANDLE)
             await self._enable_notifications(_ACTIVITY_CCCD_HANDLE)
-            await self._enable_notifications(_DATA_UPLOAD_CCCD_HANDLE)
-            await self._enable_notifications(_CHANNEL_6F05_CCCD_HANDLE)
+            await self._enable_notifications(_LARGE_FILE_CCCD_HANDLE)
+            await self._enable_notifications(_VOICE_DATA_CCCD_HANDLE)
             if self._security_level != "low":
                 # Passing `-l medium` on gatttool's command line did not
                 # secure the connection it subsequently opened.  A live HCI
@@ -408,9 +408,22 @@ async def request_fitness_data(
 
     `function_types` restricts the fetch to those `FITNESS_TYPE_*` buckets;
     the default of None fetches every bucket the watch offers.
+
+    ATT MTU 247 and the SDK-level MTU_REQUEST_CHANGE (command 0) are
+    negotiated first: live-tested 2026-09-01, a watch left on the default
+    ATT MTU answers every REQUEST_FITNESS_TYPE_ID with the bare generic
+    success `{1:113, 100:0}` and no data bean at all, so the whole fetch
+    silently returns nothing but parse errors.
     """
     results: list[tuple[protocol.FitnessTypeEntry, object]] = []
-    async with GatttoolSession(address) as session:
+    async with GatttoolSession(address, att_mtu=247) as session:
+        await session.receive_pending_messages(grace_seconds=2.0)
+        await session.send_message(protocol.encode_mtu_request_change())
+        mtu_response = await session.receive_message()
+        mtu = protocol.parse_mtu_response(mtu_response)
+        if mtu != 247:
+            raise RuntimeError(f"watch confirmed ATT MTU {mtu}, expected 247")
+
         await session.send_message(protocol.encode_request(protocol.CMD_GET_FITNESS_TYPE_ID_LIST))
         list_payload = await session.receive_message()
         entries = protocol.parse_fitness_type_id_list(list_payload)
@@ -553,9 +566,9 @@ async def bind_watch(
             raise RuntimeError("watch accepted command 18 but still reports unbound")
 
         watch_messages.extend(await session.receive_pending_messages(grace_seconds=1.0))
-        timestamp, utc_offset_eighth_hours = _local_time_parameters()
+        timestamp, utc_offset_quarter_hours = _local_time_parameters()
         await session.send_message(
-            protocol.encode_set_system_time_request(timestamp, utc_offset_eighth_hours)
+            protocol.encode_set_system_time_request(timestamp, utc_offset_quarter_hours)
         )
         time_response = await session.receive_message()
         time_status = protocol.parse_generic_response_status(
@@ -571,22 +584,22 @@ async def bind_watch(
         binding_status_response=binding_status_response,
         bound=bound,
         timestamp=timestamp,
-        utc_offset_eighth_hours=utc_offset_eighth_hours,
+        utc_offset_quarter_hours=utc_offset_quarter_hours,
         time_response=time_response,
         watch_messages=tuple(watch_messages),
     )
 
 
 def _local_time_parameters(now: dt.datetime | None = None) -> tuple[int, int]:
-    """Return Unix seconds and this firmware's UTC-offset units (eight/hour)."""
+    """Return Unix seconds and the local UTC offset in quarter-hours."""
     local_now = (now or dt.datetime.now().astimezone()).astimezone()
     offset = local_now.utcoffset() or dt.timedelta()
-    return int(local_now.timestamp()), int(offset.total_seconds() / 450)
+    return int(local_now.timestamp()), int(offset.total_seconds() / 900)
 
 
 async def set_watch_time(address: str) -> tuple[int, int, bytes, tuple[bytes, ...]]:
     """Negotiate MTU 247 and synchronize the watch with this host's clock."""
-    timestamp, utc_offset_eighth_hours = _local_time_parameters()
+    timestamp, utc_offset_quarter_hours = _local_time_parameters()
     async with GatttoolSession(address, att_mtu=247) as session:
         watch_messages = await session.receive_pending_messages(grace_seconds=2.0)
         await session.send_message(protocol.encode_mtu_request_change())
@@ -596,13 +609,13 @@ async def set_watch_time(address: str) -> tuple[int, int, bytes, tuple[bytes, ..
             raise RuntimeError(f"watch confirmed ATT MTU {mtu}, expected 247")
 
         await session.send_message(
-            protocol.encode_set_system_time_request(timestamp, utc_offset_eighth_hours)
+            protocol.encode_set_system_time_request(timestamp, utc_offset_quarter_hours)
         )
         response = await session.receive_message()
         status = protocol.parse_generic_response_status(response, protocol.CMD_SET_SYSTEM_TIME)
         if status != 0:
             raise RuntimeError(f"setting system time failed with status {status}")
-    return timestamp, utc_offset_eighth_hours, response, tuple(watch_messages)
+    return timestamp, utc_offset_quarter_hours, response, tuple(watch_messages)
 
 
 async def send_notification(
