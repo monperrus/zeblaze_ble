@@ -10,6 +10,103 @@ Main features: `battery`, `fitness`, `daily`, `sleep`, `realtime`, `heartrate`, 
 python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
+
+## Recommended Bluetooth config (Linux)
+
+This watch's dual-mode (BR/EDR + LE) bonding and its HID-over-GATT service
+trigger real bugs and unhelpful defaults in the standard Linux Bluetooth
+stack, independent of anything in this package. Root-caused live against a
+real watch on 2026-09-02 -- full narrative in `../bluetooth-problems.md`
+(problem #13). Applying these three is recommended on any machine that
+talks to this watch (or, generally, any dual-mode-bonded BLE HID-adjacent
+peripheral) via BlueZ.
+
+### 1. Disable the `hog` plugin
+
+`bluetoothd`'s built-in `hog` plugin (`profiles/input/hog.c`) auto-probes
+every BLE peripheral's HID-over-GATT service on connect. This watch exposes
+one (unrelated to its main function) but isn't bonded for it, so every
+connection logs a burst of `Request attribute has encountered an unlikely
+error` failures (`hog-lib.c:info_read_cb`/`report_reference_cb`/etc.) --
+harmless by itself, but repeats on every reconnect and is a real source of
+log noise and (per problem #13a) may correlate with connection instability.
+
+The historical fix, `DisablePlugins = input` in `/etc/bluetooth/main.conf`,
+**does nothing** on current BlueZ 5.x: that config key was removed from the
+schema at some point after BlueZ 4, and even where it's silently ignored,
+`input` was always the wrong plugin name anyway -- the actual HOG prober is
+a *separate* plugin literally named `hog`, not `input` (which instead
+controls unrelated uinput/keyboard-forwarding). The only current mechanism
+is `bluetoothd`'s own `-P`/`--noplugin` command-line flag, via a systemd
+drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/system/bluetooth.service.d
+printf '[Service]\nExecStart=\nExecStart=/usr/libexec/bluetooth/bluetoothd -P hog\n' \
+  | sudo tee /etc/systemd/system/bluetooth.service.d/override.conf
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth
+```
+
+(Adjust the `bluetoothd` path if your distribution installs it elsewhere,
+e.g. `/usr/sbin/bluetoothd`.) Delete any stale `DisablePlugins = ...` line
+left in `main.conf` -- it's a no-op and only produces an `Unknown key
+DisablePlugins` warning at every daemon start.
+
+### 2. Disable classic Hands-Free/Headset roles, if this machine has no unrelated use for them
+
+This watch's Class of Device advertises Handsfree support, so it's a
+legitimate target for WirePlumber's PipeWire Bluetooth audio-gateway roles
+-- and the watch itself makes repeated classic-BT reconnection attempts
+that contend for the adapter's radio with this package's own LE sessions
+(see `bluetooth-problems.md` problems #8 and #10). If this machine isn't
+used as a Bluetooth phone-call audio device (no soft-phone app, etc.),
+drop the Hands-Free/Headset roles globally while keeping ordinary music
+playback:
+
+```bash
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+cat > ~/.config/wireplumber/wireplumber.conf.d/zeblaze-watch-no-bt-audio.conf <<'EOF'
+monitor.bluez.properties = {
+  bluez5.roles = [ a2dp_sink a2dp_source bap_sink bap_source ]
+}
+EOF
+systemctl --user restart wireplumber.service
+```
+
+**Trade-off**: this disables classic Bluetooth call audio (HFP/HSP) system-
+wide, not just for this watch. Skip this one if you need that -- it isn't
+required for any command in this package to work, only to reduce radio
+contention and log noise from the watch's own repeated reconnect attempts.
+
+### 3. Enable automatic re-pairing after a stale bond
+
+If the watch is factory-reset (or its own bond otherwise gets cleared)
+without also removing it on this host, this host keeps retrying the old,
+now-invalid encryption key forever: `bluetoothd` retries with backoff (1s,
+2s, 4s) then silently gives up re-enabling auto-connect, with no
+indication anywhere outside `-d` debug logs (see
+`bluetooth-problems.md` problem #13 and upstream
+[bluez/bluez#433](https://github.com/bluez/bluez/issues/433)). The
+symptom looks identical to every other connection failure: `Bluetooth
+operation failed: Timed out connecting to or configuring <address>`.
+
+Add to `/etc/bluetooth/main.conf`'s `[General]` section:
+
+```
+JustWorksRepairing = always
+```
+
+then `sudo systemctl restart bluetooth`. This lets `bluetoothd` detect and
+automatically complete a fresh Just-Works re-pair when a bonded peer's own
+side has lost its keys, instead of endlessly retrying a dead key -- exactly
+this watch's pairing method already (no PIN/passkey involved). Confirmed
+against this watch's own native `bluetoothd`-managed connections; **does
+not help this package's own `gatttool`-based commands**, which connect
+unencrypted (`security_level="low"`) and never touch `bluetoothd`'s
+bonding/auth-failure logic at all -- see `../bluetooth-problems.md` problem
+#13 for why raising that default made things worse, not better.
+
 ## Usage
 
 ### Scan and inspect

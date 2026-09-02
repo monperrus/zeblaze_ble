@@ -92,6 +92,22 @@ class GatttoolSession:
     bind frames at MTU 23 and MTU 247: command 0 echoed the active MTU, and
     only 247 caused command 27 followed by bound/verified status. Merely
     keeping outbound chunks below 23 bytes is not equivalent.
+
+    Defaults to ``security_level="low"`` deliberately, not because encryption
+    wouldn't help in principle: an unencrypted ("low") connection never
+    triggers SMP/bonding negotiation, so `bluetoothd`'s connection/auth-
+    failure handling (including its recovery from a stale LTK after this
+    watch is factory reset) never runs for it either. Raising the default to
+    "medium" was tried live against this watch (2026-09-02) and made
+    reliability measurably *worse* (0/5 vs. the ~25-50% "low" baseline) --
+    "medium"/"high" needs `bluetoothd`'s own cooperation for the SMP/
+    encryption handshake after `gatttool` connects (unlike "low", which
+    doesn't touch it), and that handshake raced with `bluetoothd`'s own
+    connection-state tracking (`device_add_connection() ... is already
+    connected` observed in the journal during a failure). See
+    `bluetooth-problems.md` problem #13 for the full investigation. Not
+    ruled out as fixable, just not a safe default swap by itself -- the
+    `bleak`/D-Bus GATT migration is the follow-up path being tried instead.
     """
 
     def __init__(self, address: str, security_level: str = "low", att_mtu: int | None = None) -> None:
