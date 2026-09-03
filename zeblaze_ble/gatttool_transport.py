@@ -736,8 +736,20 @@ async def request_workout_data(address: str) -> protocol.WorkoutData:
     means a single unfetchable one (e.g. a previously stale-confirmed
     workout) blocks every other workout's data too, since a bundled
     transfer must contain every requested entry to be split successfully.
+
+    ATT MTU 247 and the SDK-level MTU_REQUEST_CHANGE (command 0) are
+    negotiated first, same as `request_fitness_data`: live-tested
+    2026-09-02, a workout fetch left on the default ATT MTU truncated the
+    bulk activity-data transfer (29 bytes received for 3 requested entries),
+    so `split_sport_data_blobs` raised instead of ever completing.
     """
-    async with GatttoolSession(address) as session:
+    async with GatttoolSession(address, att_mtu=247) as session:
+        await session.send_message(protocol.encode_mtu_request_change())
+        mtu_response = await session.receive_message()
+        mtu = protocol.parse_mtu_response(mtu_response)
+        if mtu != 247:
+            raise RuntimeError(f"watch confirmed ATT MTU {mtu}, expected 247")
+
         await session.send_message(protocol.encode_request(protocol.CMD_GET_FITNESS_SPORT_ID_LIST))
         list_payload = await session.receive_message()
         all_entries = protocol.parse_sport_id_list(list_payload)
