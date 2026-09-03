@@ -403,6 +403,43 @@ async def request_device_info(address: str) -> protocol.DeviceInfo:
     return protocol.parse_device_info(payload)
 
 
+async def request_heart_rate_monitor(address: str) -> protocol.HeartRateMonitorSettings:
+    """Connect, send GET_HEART_RATE_MONITOR (214), and return the parsed response.
+
+    Read-only. Unverified against a live watch -- see
+    protocol.CMD_GET_HEART_RATE_MONITOR's comment.
+    """
+    async with GatttoolSession(address) as session:
+        await session.send_message(protocol.encode_request(protocol.CMD_GET_HEART_RATE_MONITOR))
+        payload = await session.receive_message()
+    return protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_GET_HEART_RATE_MONITOR)
+
+
+async def set_heart_rate_monitor(
+    address: str, settings: protocol.HeartRateMonitorSettings
+) -> protocol.HeartRateMonitorSettings:
+    """Connect and send SET_HEART_RATE_MONITOR (215) with the given full settings.
+
+    Writes a user-visible device setting. This is a full-replace write, not a
+    patch -- pass every field, typically starting from a `request_heart_rate_monitor`
+    readback with only the field(s) you want to change adjusted. Unverified
+    against a live watch -- see protocol.CMD_SET_HEART_RATE_MONITOR's comment.
+    """
+    request = protocol.encode_set_heart_rate_monitor_request(
+        mode=settings.mode,
+        frequency=settings.frequency,
+        warning=settings.warning,
+        warning_value=settings.warning_value,
+        sport_warning=settings.sport_warning,
+        sport_warning_value=settings.sport_warning_value,
+        continuous_heart_rate_mode=settings.continuous_heart_rate_mode,
+    )
+    async with GatttoolSession(address) as session:
+        await session.send_message(request)
+        payload = await session.receive_message()
+    return protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_SET_HEART_RATE_MONITOR)
+
+
 _FITNESS_PARSERS = {
     protocol.FITNESS_TYPE_DAILY: protocol.parse_daily_data,
     protocol.FITNESS_TYPE_SLEEP: protocol.parse_sleep_data,

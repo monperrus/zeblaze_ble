@@ -58,6 +58,31 @@ NOTIFICATION_TYPE_MESSAGE = 2
 # ControlBleTools.sendAppNotification -- see encode_app_notification_request.
 CMD_SEND_APP_NOTIFICATION = 179
 
+# GET/SET_HEART_RATE_MONITOR -- command ids, envelope nesting (field 15 ->
+# SESettingMenu field 3 -> SEHeartRateMonitor fields 1-7), and enum values
+# below are all confirmed from the official ZH_SDK Android AAR (v2.2.0,
+# `ZH_SDK_20250808_V2.2.0.aar`, decompiled `com.zhapp.ble.ControlBleTools` /
+# `a` and `com.zh.ble.wear.protobuf.{WearProtos,SettingMenuProtos}`), not
+# from a live capture -- see ../../TODO.md's "Continuous Heart Monitoring"
+# entry. GET has never been sent to a real watch; SET has never been sent at
+# all. Treat both as unverified until confirmed live.
+CMD_GET_HEART_RATE_MONITOR = 214
+CMD_SET_HEART_RATE_MONITOR = 215
+
+# SEHeartRateMonitor.SEMode -- inverted on the wire: ControlBleTools' encoder
+# maps HeartRateMonitorBean.mode == 0 to SEMode.AUTO (monitor on) and any
+# nonzero bean.mode to SEMode.OFF. These constants are that bean-side value,
+# not the wire enum ordinal.
+HEART_RATE_MONITOR_MODE_AUTO = 0
+HEART_RATE_MONITOR_MODE_OFF = 1
+
+# SEHeartRateMonitor.SEContinuousHeartRateMode -- ALL_DAY_HEART_RATE samples
+# on a fixed frequency_minutes clock; INTELLIGENT_HEART_RATE samples sparsely,
+# triggered by movement. This is the wire representation of the app's
+# "Continuous Heart Monitoring" toggle.
+CONTINUOUS_HEART_RATE_MODE_ALL_DAY = 0
+CONTINUOUS_HEART_RATE_MODE_INTELLIGENT = 1
+
 # BindAccountProtos.SEBindResultType / SEPhoneType values observed in the
 # official Android app's successful bind exchange.
 BIND_RESULT_SUCCESS = 0
@@ -320,6 +345,78 @@ def encode_real_time_data_switch_request(enabled: bool) -> bytes:
     """
     inner = encode_field_varint(3, 0 if enabled else 1)
     return encode_field_varint(1, CMD_REAL_TIME_DATA_SWITCH) + encode_field_bytes(12, inner)
+
+
+def encode_set_heart_rate_monitor_request(
+    *,
+    frequency: int,
+    mode: int = HEART_RATE_MONITOR_MODE_AUTO,
+    warning: bool = False,
+    warning_value: int = 0,
+    sport_warning: bool = False,
+    sport_warning_value: int = 0,
+    continuous_heart_rate_mode: int = CONTINUOUS_HEART_RATE_MODE_ALL_DAY,
+) -> bytes:
+    """Build a SET_HEART_RATE_MONITOR (215) request.
+
+    Shape `{1:215, 15:{3:{1:mode, 2:frequency, 3:warning, 4:warning_value,
+    5:sport_warning, 6:sport_warning_value, 7:continuous_heart_rate_mode}}}`,
+    from the official SDK's encoder (`ControlBleTools.setHeartRateMonitor` ->
+    `a.a(215, HeartRateMonitorBean)`) -- see the CMD_SET_HEART_RATE_MONITOR
+    comment. `frequency` has no default: this is a full-replace write (the
+    official app always sends every field), so read back the watch's current
+    settings with GET_HEART_RATE_MONITOR (214) first and pass its values
+    through for any field you don't intend to change, rather than guessing.
+    """
+    inner = (
+        encode_field_varint(1, mode)
+        + encode_field_varint(2, frequency)
+        + encode_field_varint(3, 1 if warning else 0)
+        + encode_field_varint(4, warning_value)
+        + encode_field_varint(5, 1 if sport_warning else 0)
+        + encode_field_varint(6, sport_warning_value)
+        + encode_field_varint(7, continuous_heart_rate_mode)
+    )
+    setting_menu = encode_field_bytes(3, inner)
+    return encode_field_varint(1, CMD_SET_HEART_RATE_MONITOR) + encode_field_bytes(15, setting_menu)
+
+
+@dataclass(frozen=True)
+class HeartRateMonitorSettings:
+    """Decoded SEHeartRateMonitor, as read back from a GET_HEART_RATE_MONITOR (214) response.
+
+    Field layout and enum values are confirmed from the official SDK (see the
+    CMD_GET_HEART_RATE_MONITOR comment); the response's nesting under envelope
+    field 15 -> SESettingMenu field 3 is inferred by symmetry with the SET
+    request's encoder and with GET_SCREEN_SETTING's (247) own field-15
+    nesting, not yet confirmed against a live GET_HEART_RATE_MONITOR capture.
+    """
+
+    mode: int
+    frequency: int
+    warning: bool
+    warning_value: int
+    sport_warning: bool
+    sport_warning_value: int
+    continuous_heart_rate_mode: int
+
+
+def parse_heart_rate_monitor_response(payload: bytes, command_id: int) -> HeartRateMonitorSettings:
+    """Parse a GET_HEART_RATE_MONITOR (214) or SET_HEART_RATE_MONITOR (215) echo response."""
+    fields = decode_protobuf(payload)
+    if _int_field(fields, 1) != command_id:
+        raise ValueError(f"response is not for command {command_id}")
+    setting_menu = decode_protobuf(_bytes_field(fields, 15))
+    inner = decode_protobuf(_bytes_field(setting_menu, 3))
+    return HeartRateMonitorSettings(
+        mode=_optional_int(inner, 1),
+        frequency=_optional_int(inner, 2),
+        warning=bool(_optional_int(inner, 3)),
+        warning_value=_optional_int(inner, 4),
+        sport_warning=bool(_optional_int(inner, 5)),
+        sport_warning_value=_optional_int(inner, 6),
+        continuous_heart_rate_mode=_optional_int(inner, 7),
+    )
 
 
 def encode_verify_user_number_request(user_id: str) -> bytes:

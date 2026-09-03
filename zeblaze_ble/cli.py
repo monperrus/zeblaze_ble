@@ -19,9 +19,11 @@ from .gatttool_transport import (
     request_current_heart_rate,
     request_device_info,
     request_fitness_data,
+    request_heart_rate_monitor,
     request_workout_data,
     send_app_notification,
     send_notification,
+    set_heart_rate_monitor,
 )
 from .linux_gatt import inspect as inspect_gatttool
 
@@ -172,6 +174,34 @@ def parser() -> argparse.ArgumentParser:
     )
     workout_command.add_argument("address")
     workout_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    hrmonitor_command = commands.add_parser(
+        "hrmonitor",
+        help=(
+            "read the watch's heart-rate-monitor setting (mode, frequency, continuous-vs-intelligent) "
+            "(performs a protocol write; wire format unverified, see protocol.py's "
+            "CMD_GET_HEART_RATE_MONITOR comment)"
+        ),
+    )
+    hrmonitor_command.add_argument("address")
+    hrmonitor_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    hrmonitor_set_command = commands.add_parser(
+        "hrmonitor-set",
+        help=(
+            "write the watch's heart-rate-monitor setting, e.g. to turn on continuous heart monitoring "
+            "(performs a protocol write; wire format unverified, see protocol.py's "
+            "CMD_SET_HEART_RATE_MONITOR comment -- never sent to a real watch before)"
+        ),
+    )
+    hrmonitor_set_command.add_argument("address")
+    hrmonitor_set_command.add_argument("--mode", choices=("auto", "off"), default="auto")
+    hrmonitor_set_command.add_argument("--continuous-mode", choices=("all_day", "intelligent"), default="all_day")
+    hrmonitor_set_command.add_argument(
+        "--frequency",
+        type=int,
+        default=None,
+        help="sample frequency in minutes; default reads the watch's current value first and keeps it",
+    )
+    hrmonitor_set_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     return command_parser
 
 
@@ -342,6 +372,27 @@ async def run(arguments: argparse.Namespace) -> int:
             "point_data_raw_hex": data.point_data_raw.hex() if data.point_data_raw is not None else None,
         }
         print(json.dumps(result, indent=2))
+        return 0
+
+    if arguments.command == "hrmonitor":
+        settings = await request_heart_rate_monitor(arguments.address)
+        print(json.dumps(_jsonable(settings), indent=2))
+        return 0
+
+    if arguments.command == "hrmonitor-set":
+        current = await request_heart_rate_monitor(arguments.address)
+        desired = dataclasses.replace(
+            current,
+            mode=protocol.HEART_RATE_MONITOR_MODE_AUTO
+            if arguments.mode == "auto"
+            else protocol.HEART_RATE_MONITOR_MODE_OFF,
+            continuous_heart_rate_mode=protocol.CONTINUOUS_HEART_RATE_MODE_ALL_DAY
+            if arguments.continuous_mode == "all_day"
+            else protocol.CONTINUOUS_HEART_RATE_MODE_INTELLIGENT,
+            frequency=arguments.frequency if arguments.frequency is not None else current.frequency,
+        )
+        result = await set_heart_rate_monitor(arguments.address, desired)
+        print(json.dumps({"requested": _jsonable(desired), "response": _jsonable(result)}, indent=2))
         return 0
 
     def print_packet(packet: dict[str, object]) -> None:

@@ -146,6 +146,8 @@ Command 179, for example, succeeds with `08 b3 01 a0 06 00`.
 | 179 | `b3 01` | `SEND_APP_NOTIFICATION` |
 | 211 | `d3 01` | `GET_EVENT_INFO_LIST` |
 | 212 | `d4 01` | `SET_EVENT_INFO_LIST` |
+| 214 | `d6 01` | `GET_HEART_RATE_MONITOR` |
+| 215 | `d7 01` | `SET_HEART_RATE_MONITOR` |
 | 247 | `f7 01` | `GET_SCREEN_SETTING` |
 | 249 | `f9 01` | `REQUEST_SCREEN_SETTING` |
 | 480 | `e0 03` | `GET_CLASSIC_BLUETOOTH_STATE` |
@@ -668,6 +670,58 @@ Command 247 returns:
 ```
 
 Command 249 is a watch-originated request to refresh screen settings.
+
+## Heart-rate monitor settings
+
+Commands 214 (`GET_HEART_RATE_MONITOR`) and 215 (`SET_HEART_RATE_MONITOR`)
+read and write the app's "Heart Rate Monitor" setting screen, including its
+"Continuous Heart Monitoring" toggle. Unlike every other command in this
+document, this section's shape and field numbers are **not** derived from a
+live capture. They are read directly from the official ZH_SDK Android SDK
+(`ZH_SDK_20250808_V2.2.0.aar`, obtained from
+[jagatheeswaran-noise/noise-ai-ble-smartwatch](https://github.com/jagatheeswaran-noise/noise-ai-ble-smartwatch),
+decompiled with jadx): `com.zhapp.ble.ControlBleTools#getHeartRateMonitor`/
+`#setHeartRateMonitor`, its private encoder `a#a(int, HeartRateMonitorBean)`,
+and the generated `com.zh.ble.wear.protobuf.{WearProtos,SettingMenuProtos}`
+field-number constants. Command 215 has never been sent to a real watch;
+command 214 has never been sent either. Confirm both against a live watch
+(214 first, since it's read-only) before relying on this section.
+
+Command 214 takes no payload (`08 d6 01`). Command 215's request:
+
+```text
+{
+  1:215,
+  15:{                                # SESettingMenu (envelope field 15)
+    3:{                               # SEHeartRateMonitor
+      1: mode,                        # SEMode: bean value 0 -> AUTO, nonzero -> OFF (inverted on the wire)
+      2: frequency_minutes,
+      3: warning,                     # bool
+      4: warning_value,
+      5: sport_warning,               # bool
+      6: sport_warning_value,
+      7: continuous_heart_rate_mode   # SEContinuousHeartRateMode: 0 ALL_DAY_HEART_RATE, 1 INTELLIGENT_HEART_RATE
+    }
+  }
+}
+```
+
+`continuous_heart_rate_mode` is the wire representation of the app's
+"Continuous Heart Monitoring" toggle: `ALL_DAY_HEART_RATE` (0) samples on a
+fixed `frequency_minutes` clock all day; `INTELLIGENT_HEART_RATE` (1) samples
+sparsely, triggered by movement -- the likely explanation for
+`ContinuousHeartRate.frequency_minutes` reading 5 while sampled data was
+mostly zero buckets (see "Continuous heart rate" above and `../../TODO.md`).
+Command 215 is a full-replace write, not a patch on individual fields, so a
+client should read back current settings with command 214 first and only
+change the field(s) it means to change.
+
+Command 214's response nesting under envelope field 15 is inferred by
+symmetry with the command 215 request and with `GET_SCREEN_SETTING`'s (247)
+own field-15 nesting above, not confirmed by a capture.
+`protocol.encode_set_heart_rate_monitor_request()` and
+`protocol.parse_heart_rate_monitor_response()` implement this shape;
+`zeblaze-ble hrmonitor`/`hrmonitor-set` expose it on the CLI.
 
 ## Link security
 

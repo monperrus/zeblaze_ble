@@ -231,3 +231,39 @@ def test_encode_app_notification_does_not_truncate_app_or_page_name() -> None:
     assert package.encode("utf-8") in encoded
     assert ("A" * 80).encode("utf-8") in encoded
     assert b"..." not in encoded
+
+
+# Byte-level shape confirmed against the official ZH_SDK Android AAR (v2.2.0)
+# decompiled encoder (ControlBleTools.setHeartRateMonitor -> a.a(215, bean));
+# there is no live watch capture for command 214/215 yet, so this is a
+# self-consistency round-trip, not a captured-frame comparison like the
+# app-notification tests above.
+def test_encode_set_heart_rate_monitor_matches_the_sdk_decompiled_shape() -> None:
+    encoded = protocol.encode_set_heart_rate_monitor_request(
+        frequency=5,
+        mode=protocol.HEART_RATE_MONITOR_MODE_AUTO,
+        continuous_heart_rate_mode=protocol.CONTINUOUS_HEART_RATE_MODE_ALL_DAY,
+    )
+    assert encoded == bytes.fromhex("08d7017a101a0e0800100518002000280030003800")
+
+
+def test_heart_rate_monitor_request_round_trips_through_parse() -> None:
+    encoded = protocol.encode_set_heart_rate_monitor_request(
+        frequency=10,
+        mode=protocol.HEART_RATE_MONITOR_MODE_OFF,
+        warning=True,
+        warning_value=150,
+        sport_warning=True,
+        sport_warning_value=170,
+        continuous_heart_rate_mode=protocol.CONTINUOUS_HEART_RATE_MODE_INTELLIGENT,
+    )
+    parsed = protocol.parse_heart_rate_monitor_response(encoded, protocol.CMD_SET_HEART_RATE_MONITOR)
+    assert parsed == protocol.HeartRateMonitorSettings(
+        mode=protocol.HEART_RATE_MONITOR_MODE_OFF,
+        frequency=10,
+        warning=True,
+        warning_value=150,
+        sport_warning=True,
+        sport_warning_value=170,
+        continuous_heart_rate_mode=protocol.CONTINUOUS_HEART_RATE_MODE_INTELLIGENT,
+    )
