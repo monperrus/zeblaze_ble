@@ -250,13 +250,16 @@ zeblaze-ble hrmonitor-set <ADDRESS> --mode auto --continuous-mode all_day --i-un
 ```
 
 `hrmonitor` (command 214) reads the watch's heart-rate-monitor setting;
-`hrmonitor-set` (command 215) writes it. `--mode auto` turns the monitor on
-(`off` disables it), `--continuous-mode all_day` samples every
-`--frequency` minutes around the clock while `intelligent` samples sparsely
-on movement. Together they are the app's "Continuous Heart Monitoring"
-switch. The write is a full replace, so the CLI reads the current settings
-first and changes only what you asked for; the watch answers 215 with a bare
-ack, so the CLI reads back afterwards and reports the result under `stored`.
+`hrmonitor-set` (command 215) writes it. **`--mode auto` is the switch that
+matters**: it is exactly the app's "Continuous Heart Monitoring" toggle, and
+with `off` the watch records almost nothing. `--continuous-mode` and
+`--frequency` are carried by the protocol but have no observed effect on this
+watch -- the official app never writes the first and always sends 0 for the
+second, and a written `--frequency 1` reads back as the watch's fixed 5.
+
+The write is a full replace, so the CLI reads the current settings first and
+changes only what you asked for; the watch answers 215 with a bare ack, so
+the CLI reads back afterwards and reports the result under `stored`.
 
 ```json
 {

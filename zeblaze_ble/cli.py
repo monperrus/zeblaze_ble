@@ -192,13 +192,26 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     hrmonitor_set_command.add_argument("address")
-    hrmonitor_set_command.add_argument("--mode", choices=("auto", "off"), default="auto")
-    hrmonitor_set_command.add_argument("--continuous-mode", choices=("all_day", "intelligent"), default="all_day")
+    hrmonitor_set_command.add_argument(
+        "--mode",
+        choices=("auto", "off"),
+        default="auto",
+        help="the app's Continuous Heart Monitoring switch: auto samples all day, off records almost nothing",
+    )
+    hrmonitor_set_command.add_argument(
+        "--continuous-mode",
+        choices=("all_day", "intelligent"),
+        default="all_day",
+        help="carried by the protocol, but the official app never writes it and it has no observed effect here",
+    )
     hrmonitor_set_command.add_argument(
         "--frequency",
         type=int,
         default=None,
-        help="sample frequency in minutes; default reads the watch's current value first and keeps it",
+        help=(
+            "sample frequency in minutes; default reads the watch's current value first and keeps it. "
+            "The Beyond 3 Pro ignores this and stays at 5"
+        ),
     )
     hrmonitor_set_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     return command_parser

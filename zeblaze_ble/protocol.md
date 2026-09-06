@@ -732,12 +732,26 @@ Command 214 takes no payload (`08 d6 01`). Command 215's request:
 }
 ```
 
-`continuous_heart_rate_mode` is the wire representation of the app's
-"Continuous Heart Monitoring" toggle: `ALL_DAY_HEART_RATE` (0) samples on a
-fixed `frequency_minutes` clock all day; `INTELLIGENT_HEART_RATE` (1) samples
-sparsely, triggered by movement -- the likely explanation for
-`ContinuousHeartRate.frequency_minutes` reading 5 while sampled data was
-mostly zero buckets (see "Continuous heart rate" above and `../../TODO.md`).
+**`mode` is the app's "Continuous Heart Monitoring" toggle**, and it is the
+field that decides whether the watch samples at all. The Zeblaze Fit app's
+`HeartRateSettingActivity` binds its `chbContinuousHeartHare` switch straight
+to this field, inverted both ways: it renders the switch as
+`setChecked(mode == 0)` and saves it as `mode = !checked`. Confirmed live
+2026-09-06: with `mode` 1 the watch's continuous-heart-rate buckets were
+empty apart from a stray sample a day; the moment `mode` 0 was written, they
+filled at one sample per 5 minutes with no gaps.
+
+`continuous_heart_rate_mode` -- `ALL_DAY_HEART_RATE` (0) vs.
+`INTELLIGENT_HEART_RATE` (1), nominally a fixed clock vs. movement-triggered
+sampling -- is **not** what that toggle writes, despite the name. This app's
+heart-rate settings screen never touches the field, and this watch reported 0
+even while it was sampling nothing, so its practical effect here is unknown.
+
+`frequency` is inert on this watch. The app hard-codes it to 0 on every save
+(`iput v1` with `const/4 v1, 0x0`), and the watch reports 5 regardless:
+writing 1 was accepted and read back as 5 (tested live 2026-09-06). The
+5-minute cadence looks firmware-fixed, and the observed data matches it.
+
 Command 215 is a full-replace write, not a patch on individual fields, so a
 client should read back current settings with command 214 first and only
 change the field(s) it means to change.

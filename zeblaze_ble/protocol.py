@@ -78,14 +78,18 @@ CMD_SET_HEART_RATE_MONITOR = 215
 # SEHeartRateMonitor.SEMode -- inverted on the wire: ControlBleTools' encoder
 # maps HeartRateMonitorBean.mode == 0 to SEMode.AUTO (monitor on) and any
 # nonzero bean.mode to SEMode.OFF. These constants are that bean-side value,
-# not the wire enum ordinal.
+# not the wire enum ordinal. This field *is* the app's "Continuous Heart
+# Monitoring" switch (`HeartRateSettingActivity.chbContinuousHeartHare`,
+# checked == mode 0) and the one that decides whether the watch samples.
 HEART_RATE_MONITOR_MODE_AUTO = 0
 HEART_RATE_MONITOR_MODE_OFF = 1
 
 # SEHeartRateMonitor.SEContinuousHeartRateMode -- ALL_DAY_HEART_RATE samples
 # on a fixed frequency_minutes clock; INTELLIGENT_HEART_RATE samples sparsely,
-# triggered by movement. This is the wire representation of the app's
-# "Continuous Heart Monitoring" toggle.
+# triggered by movement. Despite the name this is *not* the app's "Continuous
+# Heart Monitoring" toggle (that is `mode` above): the app's heart-rate
+# settings screen never writes this field, and its effect on this watch is
+# unknown -- see protocol.md.
 CONTINUOUS_HEART_RATE_MODE_ALL_DAY = 0
 CONTINUOUS_HEART_RATE_MODE_INTELLIGENT = 1
 
