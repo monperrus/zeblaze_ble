@@ -36,6 +36,7 @@ _MESSAGE_PARSERS = {
     protocol.CMD_GET_DEVICE_INFO: protocol.parse_device_info,
     protocol.CMD_GET_FITNESS_TYPE_ID_LIST: protocol.parse_fitness_type_id_list,
     protocol.CMD_GET_FITNESS_SPORT_ID_LIST: protocol.parse_sport_id_list,
+    protocol.CMD_REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS: protocol.parse_classic_bluetooth_status,
 }
 
 

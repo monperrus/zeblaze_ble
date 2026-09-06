@@ -259,19 +259,45 @@ supported language list. Command 164 enables real-time reports:
 
 The watch answers command 164 by pushing command 165.
 
-### Binding completion event: command 27
+### Classic-radio status announcement: command 27
 
-Command 27 is watch-originated and carries classic-radio state:
+Command 27 is `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS`
+(`WearProtos.SEWear.SEFunctionId`). It is watch-originated and reports the
+state of the watch's *classic* (BR/EDR) radio, not its BLE link:
 
 ```text
 08 1b 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
 ```
 
+Shape `{1:27, 3:{8:{1:connect_status, 2:switch, 3:mac}}}` -- envelope field 3
+is `SEBindAccount`, its field 8 is `classic_bluetooth_status`
+(`SEClassicBluetoothStatus`), whose fields the SDK surfaces as
+`ClassicBleStatusBean{isConnect, isSwitch, mac}` through
+`RequestClassicBleConnectStatusCallBack.onConnectState`:
+
+| Field | Name | Meaning |
+| --- | --- | --- |
+| 1 | `inquiry_classic_bluetooth_connect_status` | bool: a classic connection is up |
+| 2 | `inquiry_classic_bluetooth_switch` | bool: the classic radio is enabled |
+| 3 | `inquiry_classic_bluetooth_mac` | the watch's classic BR/EDR address, as text |
+
+The capture above therefore reads: classic radio on, nothing connected to it,
+classic address `D6:45:15:30:04:71` -- the same address as this watch's BLE
+one.
+
+The watch emits this unprompted a second or two after **every** connection,
+not only after a bind (observed live 2026-09-06 on a long-bound watch with
+`scripts/watch_monitor.py`). It is a status announcement, not a question: no
+application-level reply exists for it. The phone never sends 27 either --
+the official SDK's only outbound use of the number is an unrelated Berry-
+protocol subcommand, and there is no Apricot encoder for it.
+
 Do not synthesize command 27 from the host. Receive and acknowledge it using
 the normal chunked transport when it is emitted. The watch waits for that
-acknowledgement before serving later application messages, so clients must
-not discard notifications received on another characteristic while awaiting
-a command ACK.
+transport acknowledgement before serving later application messages, so
+clients must not discard notifications received on another characteristic
+while awaiting a command ACK -- a command written before command 27 is
+acknowledged simply goes unanswered.
 
 ### User verification: command 19
 

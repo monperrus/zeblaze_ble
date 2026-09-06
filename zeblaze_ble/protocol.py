@@ -35,6 +35,12 @@ CMD_BINDING_CHECK = 17
 CMD_BINDING_RESULT = 18
 CMD_VERIFY_USER_NUMBER = 19
 CMD_UNBIND_REQUEST = 23
+
+# Watch-originated only: the watch announces its classic (BR/EDR) radio state
+# a moment after every connection, and waits for the transport ack before
+# serving anything else. Never sent by us -- see protocol.md's
+# "Classic-radio status announcement".
+CMD_REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS = 27
 CMD_GET_DEVICE_INFO = 32
 CMD_GET_DEVICE_BATTERY = 33
 CMD_SET_SYSTEM_TIME = 48
@@ -107,6 +113,7 @@ COMMAND_NAMES = {
     CMD_BINDING_RESULT: "BINDING_RESULT",
     CMD_VERIFY_USER_NUMBER: "VERIFY_USER_NUMBER",
     CMD_UNBIND_REQUEST: "UNBIND_REQUEST",
+    CMD_REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS: "REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS",
     CMD_GET_DEVICE_INFO: "GET_DEVICE_INFO",
     CMD_GET_DEVICE_BATTERY: "GET_DEVICE_BATTERY",
     CMD_SET_SYSTEM_TIME: "SET_SYSTEM_TIME",
@@ -322,6 +329,34 @@ def parse_binding_status_response(payload: bytes) -> bool:
         raise ValueError("response is not for INQUIRY_BINDING_STATUS")
     status = decode_protobuf(_bytes_field(fields, 3))
     return bool(_int_field(status, 1))
+
+
+@dataclass(frozen=True)
+class ClassicBluetoothStatus:
+    """The watch's own report of its classic (BR/EDR) radio, from command 27.
+
+    Mirrors the SDK's `ClassicBleStatusBean{isConnect, isSwitch, mac}`, which
+    it fills from `SEBindAccount.classic_bluetooth_status`. `mac` is the
+    watch's classic address, which on this watch equals its BLE address.
+    """
+
+    connected: bool
+    radio_enabled: bool
+    mac: str
+
+
+def parse_classic_bluetooth_status(payload: bytes) -> ClassicBluetoothStatus:
+    """Parse a watch-originated command 27, `{1:27, 3:{8:{1:connect, 2:switch, 3:mac}}}`."""
+    fields = decode_protobuf(payload)
+    if _int_field(fields, 1) != CMD_REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS:
+        raise ValueError("message is not REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS")
+    bind_account = decode_protobuf(_bytes_field(fields, 3))
+    status = decode_protobuf(_bytes_field(bind_account, 8))
+    return ClassicBluetoothStatus(
+        connected=bool(_optional_int(status, 1)),
+        radio_enabled=bool(_optional_int(status, 2)),
+        mac=_bytes_field(status, 3).decode(errors="replace") if 3 in status else "",
+    )
 
 
 def encode_time(year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0) -> bytes:

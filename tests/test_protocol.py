@@ -290,3 +290,14 @@ def test_heart_rate_monitor_request_round_trips_through_parse() -> None:
         sport_warning_value=170,
         continuous_heart_rate_mode=protocol.CONTINUOUS_HEART_RATE_MODE_INTELLIGENT,
     )
+
+
+def test_classic_bluetooth_status_parses_the_watch_announcement() -> None:
+    # Captured 2026-09-06: command 27, pushed by the watch shortly after every
+    # connection. Classic radio on, nothing connected to it.
+    payload = bytes.fromhex("081b1a194217080010011a1144363a34353a31353a33303a30343a3731")
+    assert protocol.parse_classic_bluetooth_status(payload) == protocol.ClassicBluetoothStatus(
+        connected=False,
+        radio_enabled=True,
+        mac="D6:45:15:30:04:71",
+    )
