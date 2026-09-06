@@ -446,6 +446,10 @@ async def request_heart_rate_monitor(address: str) -> protocol.HeartRateMonitorS
     Read-only. Verified against a live watch on 2026-09-06.
     """
     async with GatttoolSession(address) as session:
+        # The watch pushes command 27 after connecting and answers nothing
+        # until it is acknowledged (see protocol.md); without this drain the
+        # request below times out about as often as not.
+        await session.receive_pending_messages(grace_seconds=2.0)
         await session.send_message(protocol.encode_request(protocol.CMD_GET_HEART_RATE_MONITOR))
         payload = await session.receive_message()
     settings = protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_GET_HEART_RATE_MONITOR)
@@ -475,6 +479,7 @@ async def set_heart_rate_monitor(
         continuous_heart_rate_mode=settings.continuous_heart_rate_mode,
     )
     async with GatttoolSession(address) as session:
+        await session.receive_pending_messages(grace_seconds=2.0)
         await session.send_message(request)
         payload = await session.receive_message()
     return protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_SET_HEART_RATE_MONITOR)
