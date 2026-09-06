@@ -30,6 +30,20 @@ _LARGE_FILE_CCCD_HANDLE = 0x002B
 _VOICE_DATA_VALUE_HANDLE = 0x002D  # 16186f05 characteristic value
 _VOICE_DATA_CCCD_HANDLE = 0x002E
 
+# Public alias of the command-response channel, for callers that drive the
+# transport themselves (see scripts/watch_monitor.py).
+READ_VALUE_HANDLE = _READ_VALUE_HANDLE
+
+# Every notifying characteristic this watch exposes, by its value handle --
+# the set GatttoolSession subscribes to on connect. Names follow protocol.md.
+CHANNEL_NAMES = {
+    _READ_VALUE_HANDLE: "6f01 read/command-response",
+    _WRITE_VALUE_HANDLE: "6f02 write-ack",
+    _ACTIVITY_VALUE_HANDLE: "6f03 activity/bulk-data",
+    _LARGE_FILE_VALUE_HANDLE: "6f04 large-file",
+    _VOICE_DATA_VALUE_HANDLE: "6f05 voice-data",
+}
+
 _NOTIFICATION_RE = re.compile(r"Notification handle = 0x([0-9a-fA-F]+) value: ([0-9a-fA-F ]+)")
 _PROMPT_TIMEOUT_SECONDS = 15.0
 _CONNECTION_TIMEOUT_SECONDS = 40.0
@@ -216,8 +230,12 @@ class GatttoolSession:
             if not line_bytes:
                 return
             line = line_bytes.decode(errors="replace").strip()
-            match = _NOTIFICATION_RE.search(line)
-            if match:
+            # Two notifications can land on one output line (gatttool writes
+            # them without a newline of their own when they arrive back to
+            # back). Matching only the first silently dropped one frame of a
+            # burst -- observed live 2026-09-06 as chunk 5 of every 12-chunk
+            # REPORT_BASIC_DATA never arriving, stalling the reassembly.
+            for match in _NOTIFICATION_RE.finditer(line):
                 handle = int(match.group(1), 16)
                 value = bytes.fromhex(match.group(2).replace(" ", ""))
                 self._notifications.put_nowait((handle, value))
@@ -305,6 +323,25 @@ class GatttoolSession:
             if handle in expect_handles:
                 return handle, value
             self._pending_notifications[handle].append(value)
+
+    async def next_raw_notification(self, timeout: float | None = None) -> tuple[int, bytes]:
+        """Return the next (value_handle, frame) from any subscribed channel.
+
+        Bypasses the per-handle reassembly `receive_message` does, so a caller
+        can observe every frame the watch sends -- including on channels no
+        command of ours ever reads. A caller using this owns the transport
+        handshake itself (ready-ack on a header frame, complete-ack after the
+        last chunk); mixing it with `receive_message` in the same session will
+        make the two compete for frames.
+        """
+        for handle, pending in self._pending_notifications.items():
+            if pending:
+                return handle, pending.popleft()
+        return await asyncio.wait_for(self._notifications.get(), timeout=timeout)
+
+    async def acknowledge(self, value_handle: int, frame: bytes) -> None:
+        """Write a transport ack (`protocol.ACK_READY`/`ACK_COMPLETE`) to a channel."""
+        await self._write(value_handle, frame)
 
     async def send_message(self, payload: bytes, mtu_chunk_size: int = 180) -> None:
         chunks = [payload[i : i + mtu_chunk_size] for i in range(0, len(payload), mtu_chunk_size)] or [b""]
@@ -406,24 +443,27 @@ async def request_device_info(address: str) -> protocol.DeviceInfo:
 async def request_heart_rate_monitor(address: str) -> protocol.HeartRateMonitorSettings:
     """Connect, send GET_HEART_RATE_MONITOR (214), and return the parsed response.
 
-    Read-only. Unverified against a live watch -- see
-    protocol.CMD_GET_HEART_RATE_MONITOR's comment.
+    Read-only. Verified against a live watch on 2026-09-06.
     """
     async with GatttoolSession(address) as session:
         await session.send_message(protocol.encode_request(protocol.CMD_GET_HEART_RATE_MONITOR))
         payload = await session.receive_message()
-    return protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_GET_HEART_RATE_MONITOR)
+    settings = protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_GET_HEART_RATE_MONITOR)
+    if settings is None:
+        raise ValueError("watch acknowledged command 214 without returning its settings")
+    return settings
 
 
 async def set_heart_rate_monitor(
     address: str, settings: protocol.HeartRateMonitorSettings
-) -> protocol.HeartRateMonitorSettings:
+) -> protocol.HeartRateMonitorSettings | None:
     """Connect and send SET_HEART_RATE_MONITOR (215) with the given full settings.
 
     Writes a user-visible device setting. This is a full-replace write, not a
     patch -- pass every field, typically starting from a `request_heart_rate_monitor`
-    readback with only the field(s) you want to change adjusted. Unverified
-    against a live watch -- see protocol.CMD_SET_HEART_RATE_MONITOR's comment.
+    readback with only the field(s) you want to change adjusted. Verified
+    against a live watch on 2026-09-06: the reply is a bare ack, so this
+    returns `None` and the caller should re-read with 214 to confirm.
     """
     request = protocol.encode_set_heart_rate_monitor_request(
         mode=settings.mode,

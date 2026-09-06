@@ -178,8 +178,7 @@ def parser() -> argparse.ArgumentParser:
         "hrmonitor",
         help=(
             "read the watch's heart-rate-monitor setting (mode, frequency, continuous-vs-intelligent) "
-            "(performs a protocol write; wire format unverified, see protocol.py's "
-            "CMD_GET_HEART_RATE_MONITOR comment)"
+            "(performs a protocol write; see protocol.py's CMD_GET_HEART_RATE_MONITOR comment)"
         ),
     )
     hrmonitor_command.add_argument("address")
@@ -188,8 +187,8 @@ def parser() -> argparse.ArgumentParser:
         "hrmonitor-set",
         help=(
             "write the watch's heart-rate-monitor setting, e.g. to turn on continuous heart monitoring "
-            "(performs a protocol write; wire format unverified, see protocol.py's "
-            "CMD_SET_HEART_RATE_MONITOR comment -- never sent to a real watch before)"
+            "(writes a persistent, user-visible device setting; full replace, not a patch -- "
+            "see protocol.py's CMD_SET_HEART_RATE_MONITOR comment)"
         ),
     )
     hrmonitor_set_command.add_argument("address")
@@ -391,8 +390,19 @@ async def run(arguments: argparse.Namespace) -> int:
             else protocol.CONTINUOUS_HEART_RATE_MODE_INTELLIGENT,
             frequency=arguments.frequency if arguments.frequency is not None else current.frequency,
         )
-        result = await set_heart_rate_monitor(arguments.address, desired)
-        print(json.dumps({"requested": _jsonable(desired), "response": _jsonable(result)}, indent=2))
+        echo = await set_heart_rate_monitor(arguments.address, desired)
+        # 215 answers with a bare ack, so read the setting back to report what stuck.
+        stored = await request_heart_rate_monitor(arguments.address)
+        print(
+            json.dumps(
+                {
+                    "requested": _jsonable(desired),
+                    "response": _jsonable(echo),
+                    "stored": _jsonable(stored),
+                },
+                indent=2,
+            )
+        )
         return 0
 
     def print_packet(packet: dict[str, object]) -> None:

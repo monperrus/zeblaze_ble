@@ -247,6 +247,29 @@ def test_encode_set_heart_rate_monitor_matches_the_sdk_decompiled_shape() -> Non
     assert encoded == bytes.fromhex("08d7017a101a0e0800100518002000280030003800")
 
 
+def test_heart_rate_monitor_bare_ack_parses_as_no_settings() -> None:
+    # What a real watch answers to command 215: `{1: 215}`, no field 15.
+    assert protocol.parse_heart_rate_monitor_response(bytes.fromhex("08d701"), protocol.CMD_SET_HEART_RATE_MONITOR) is None
+
+
+def test_heart_rate_monitor_response_parses_the_live_watch_reply() -> None:
+    # Captured 2026-09-06 from the Beyond 3 Pro's reply to command 214, with
+    # the monitor on (mode 0) and continuous mode ALL_DAY. The watch omits
+    # zero-valued trailing fields, so only fields 1-4 are on the wire.
+    payload = bytes.fromhex("08d6017a0a1a080800100518002000")
+    assert protocol.parse_heart_rate_monitor_response(payload, protocol.CMD_GET_HEART_RATE_MONITOR) == (
+        protocol.HeartRateMonitorSettings(
+            mode=protocol.HEART_RATE_MONITOR_MODE_AUTO,
+            frequency=5,
+            warning=False,
+            warning_value=0,
+            sport_warning=False,
+            sport_warning_value=0,
+            continuous_heart_rate_mode=protocol.CONTINUOUS_HEART_RATE_MODE_ALL_DAY,
+        )
+    )
+
+
 def test_heart_rate_monitor_request_round_trips_through_parse() -> None:
     encoded = protocol.encode_set_heart_rate_monitor_request(
         frequency=10,

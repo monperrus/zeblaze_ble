@@ -675,17 +675,17 @@ Command 249 is a watch-originated request to refresh screen settings.
 
 Commands 214 (`GET_HEART_RATE_MONITOR`) and 215 (`SET_HEART_RATE_MONITOR`)
 read and write the app's "Heart Rate Monitor" setting screen, including its
-"Continuous Heart Monitoring" toggle. Unlike every other command in this
-document, this section's shape and field numbers are **not** derived from a
-live capture. They are read directly from the official ZH_SDK Android SDK
+"Continuous Heart Monitoring" toggle. This section's shape and field numbers
+were first read directly from the official ZH_SDK Android SDK
 (`ZH_SDK_20250808_V2.2.0.aar`, obtained from
 [jagatheeswaran-noise/noise-ai-ble-smartwatch](https://github.com/jagatheeswaran-noise/noise-ai-ble-smartwatch),
 decompiled with jadx): `com.zhapp.ble.ControlBleTools#getHeartRateMonitor`/
 `#setHeartRateMonitor`, its private encoder `a#a(int, HeartRateMonitorBean)`,
 and the generated `com.zh.ble.wear.protobuf.{WearProtos,SettingMenuProtos}`
-field-number constants. Command 215 has never been sent to a real watch;
-command 214 has never been sent either. Confirm both against a live watch
-(214 first, since it's read-only) before relying on this section.
+field-number constants. Both commands are now confirmed against a live
+Beyond 3 Pro (2026-09-06): 214 returned the bean under the nesting below, and
+215 changed the setting, the change surviving a fresh 214 read on a new
+connection.
 
 Command 214 takes no payload (`08 d6 01`). Command 215's request:
 
@@ -716,9 +716,20 @@ Command 215 is a full-replace write, not a patch on individual fields, so a
 client should read back current settings with command 214 first and only
 change the field(s) it means to change.
 
-Command 214's response nesting under envelope field 15 is inferred by
-symmetry with the command 215 request and with `GET_SCREEN_SETTING`'s (247)
-own field-15 nesting above, not confirmed by a capture.
+Command 214's response uses the same field-15 -> field-3 nesting as the
+command 215 request above. It omits zero-valued fields the way proto3
+does, so a reply can stop short of field 7 (`08 d6 01 7a 0a 1a 08 08 00 10
+05 18 00 20 00` is a real one: mode 0, frequency 5, everything else
+default). Field 8 (`low_warning_value`) has not been seen.
+Command 215's own response is a bare
+`{1:215}` ack with no field 15, so a client that wants to see what was
+stored must re-read with 214 rather than parse the reply. Observed live: a
+watch with monitoring off answers 214 with `mode` 1 and
+`continuous_heart_rate_mode` 0; after a 215 write of `mode` 0 the next 214
+read returns `mode` 0. The watch also zeroed `warning_value` (130 -> 0) on
+that write, with `warning` false in both the read-back and the written
+request -- so `warning_value` appears to be kept only while `warning` is
+set.
 `protocol.encode_set_heart_rate_monitor_request()` and
 `protocol.parse_heart_rate_monitor_response()` implement this shape;
 `zeblaze-ble hrmonitor`/`hrmonitor-set` expose it on the CLI.

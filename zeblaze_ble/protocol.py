@@ -63,9 +63,9 @@ CMD_SEND_APP_NOTIFICATION = 179
 # below are all confirmed from the official ZH_SDK Android AAR (v2.2.0,
 # `ZH_SDK_20250808_V2.2.0.aar`, decompiled `com.zhapp.ble.ControlBleTools` /
 # `a` and `com.zh.ble.wear.protobuf.{WearProtos,SettingMenuProtos}`), not
-# from a live capture -- see ../../TODO.md's "Continuous Heart Monitoring"
-# entry. GET has never been sent to a real watch; SET has never been sent at
-# all. Treat both as unverified until confirmed live.
+# from a live capture. Both are now confirmed live against a Beyond 3 Pro
+# (2026-09-06): 214 returns the bean under that nesting, 215 changes the
+# setting and answers with a bare `{1:215}` ack -- read back with 214.
 CMD_GET_HEART_RATE_MONITOR = 214
 CMD_SET_HEART_RATE_MONITOR = 215
 
@@ -96,6 +96,34 @@ PHONE_TYPE_IOS = 1
 # its p3/p4/p5 (title/text/ticker) arguments.
 APP_NOTIFICATION_TITLE_MAX = 50
 APP_NOTIFICATION_TEXT_MAX = 200
+
+# Human-readable names for every command id this package knows, for logging
+# and exploration (see scripts/watch_monitor.py). An id missing from here is
+# not necessarily unknown to the watch -- only to us.
+COMMAND_NAMES = {
+    CMD_MTU_REQUEST_CHANGE: "MTU_REQUEST_CHANGE",
+    CMD_INQUIRY_BINDING_STATUS: "INQUIRY_BINDING_STATUS",
+    CMD_BINDING_CHECK: "BINDING_CHECK",
+    CMD_BINDING_RESULT: "BINDING_RESULT",
+    CMD_VERIFY_USER_NUMBER: "VERIFY_USER_NUMBER",
+    CMD_UNBIND_REQUEST: "UNBIND_REQUEST",
+    CMD_GET_DEVICE_INFO: "GET_DEVICE_INFO",
+    CMD_GET_DEVICE_BATTERY: "GET_DEVICE_BATTERY",
+    CMD_SET_SYSTEM_TIME: "SET_SYSTEM_TIME",
+    CMD_GET_LANGUAGE_DETAILED: "GET_LANGUAGE_DETAILED",
+    CMD_GET_FITNESS_TYPE_ID_LIST: "GET_FITNESS_TYPE_ID_LIST",
+    CMD_REQUEST_FITNESS_TYPE_ID: "REQUEST_FITNESS_TYPE_ID",
+    CMD_CONFIRM_FITNESS_TYPE_ID: "CONFIRM_FITNESS_TYPE_ID",
+    CMD_GET_FITNESS_SPORT_ID_LIST: "GET_FITNESS_SPORT_ID_LIST",
+    CMD_REQUEST_FITNESS_SPORT_DATA: "REQUEST_FITNESS_SPORT_DATA",
+    CMD_CONFIRM_FITNESS_SPORT_ID_LIST: "CONFIRM_FITNESS_SPORT_ID_LIST",
+    CMD_REAL_TIME_DATA_SWITCH: "REAL_TIME_DATA_SWITCH",
+    CMD_REPORT_BASIC_DATA: "REPORT_BASIC_DATA",
+    CMD_SEND_SYSTEM_NOTIFICATION: "SEND_SYSTEM_NOTIFICATION",
+    CMD_SEND_APP_NOTIFICATION: "SEND_APP_NOTIFICATION",
+    CMD_GET_HEART_RATE_MONITOR: "GET_HEART_RATE_MONITOR",
+    CMD_SET_HEART_RATE_MONITOR: "SET_HEART_RATE_MONITOR",
+}
 
 # Low 2 bits of a sport-entry id's last byte (see SportEntryId below).
 SPORT_DATA_POINT = 0  # per-interval samples, structure not decoded (see protocol.md)
@@ -386,10 +414,11 @@ class HeartRateMonitorSettings:
     """Decoded SEHeartRateMonitor, as read back from a GET_HEART_RATE_MONITOR (214) response.
 
     Field layout and enum values are confirmed from the official SDK (see the
-    CMD_GET_HEART_RATE_MONITOR comment); the response's nesting under envelope
-    field 15 -> SESettingMenu field 3 is inferred by symmetry with the SET
-    request's encoder and with GET_SCREEN_SETTING's (247) own field-15
-    nesting, not yet confirmed against a live GET_HEART_RATE_MONITOR capture.
+    CMD_GET_HEART_RATE_MONITOR comment). The response's nesting under envelope
+    field 15 -> SESettingMenu field 3 was confirmed live on 2026-09-06:
+    a real Beyond 3 Pro answered 214 with exactly that shape. Zero-valued
+    fields are omitted proto3-style, so every field is optional here; field 8
+    (`low_warning_value`) has not been seen at all.
     """
 
     mode: int
@@ -401,11 +430,19 @@ class HeartRateMonitorSettings:
     continuous_heart_rate_mode: int
 
 
-def parse_heart_rate_monitor_response(payload: bytes, command_id: int) -> HeartRateMonitorSettings:
-    """Parse a GET_HEART_RATE_MONITOR (214) or SET_HEART_RATE_MONITOR (215) echo response."""
+def parse_heart_rate_monitor_response(payload: bytes, command_id: int) -> HeartRateMonitorSettings | None:
+    """Parse a GET_HEART_RATE_MONITOR (214) or SET_HEART_RATE_MONITOR (215) response.
+
+    Returns `None` when the watch acknowledges without echoing the settings.
+    Verified live on 2026-09-06: 214 answers with the full field-15 -> field-3
+    bean, while 215 answers with a bare `{1: 215}` ack -- re-read with 214 to
+    confirm what was actually stored.
+    """
     fields = decode_protobuf(payload)
     if _int_field(fields, 1) != command_id:
         raise ValueError(f"response is not for command {command_id}")
+    if 15 not in fields:
+        return None
     setting_menu = decode_protobuf(_bytes_field(fields, 15))
     inner = decode_protobuf(_bytes_field(setting_menu, 3))
     return HeartRateMonitorSettings(

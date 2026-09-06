@@ -242,6 +242,52 @@ GPS track (timestamp + longitude + latitude per point).
 
 Returns an empty `entries` list if nothing is currently queued.
 
+### Continuous heart monitoring
+
+```bash
+zeblaze-ble hrmonitor <ADDRESS> --i-understand-this-writes
+zeblaze-ble hrmonitor-set <ADDRESS> --mode auto --continuous-mode all_day --i-understand-this-writes
+```
+
+`hrmonitor` (command 214) reads the watch's heart-rate-monitor setting;
+`hrmonitor-set` (command 215) writes it. `--mode auto` turns the monitor on
+(`off` disables it), `--continuous-mode all_day` samples every
+`--frequency` minutes around the clock while `intelligent` samples sparsely
+on movement. Together they are the app's "Continuous Heart Monitoring"
+switch. The write is a full replace, so the CLI reads the current settings
+first and changes only what you asked for; the watch answers 215 with a bare
+ack, so the CLI reads back afterwards and reports the result under `stored`.
+
+```json
+{
+  "mode": 0,
+  "frequency": 5,
+  "warning": false,
+  "warning_value": 0,
+  "sport_warning": false,
+  "sport_warning_value": 0,
+  "continuous_heart_rate_mode": 0
+}
+```
+
+### Watching every channel
+
+```bash
+.venv/bin/python scripts/watch_monitor.py <ADDRESS> --seconds 60 --realtime
+```
+
+Connects once, subscribes to all five notifying characteristics (6f01
+command-response, 6f02 write-ack, 6f03 activity/bulk data, 6f04 large-file,
+6f05 voice) and prints each complete message the watch sends, decoded: the
+command id and name, a parsed structure where this package has a parser, and
+a generic protobuf field dump where it does not. Useful for finding commands
+that are not implemented yet.
+
+It sends nothing on its own except the chunked transport's acks; `--realtime`
+additionally turns on the watch's live push (command 164) so heart-rate and
+step reports arrive every few seconds. `--frames` adds every individual
+transport frame, and `--seconds 0` (the default) runs until Ctrl-C.
+
 ## Tests
 
 ```bash
