@@ -1,4 +1,4 @@
-# Apricot protocol
+# Zeblaze Beyond 3 Pro protocol
 
 A wire-format reference for the Apricot protocol: its GATT service, chunked
 transport, command ids, and message layouts. Format facts only -- how any of
