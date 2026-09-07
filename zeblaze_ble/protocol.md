@@ -811,8 +811,10 @@ Command 253 is watch-originated: the SDK's dispatcher answers it with
 to it. That is the general shape of this family -- `GET` even, `SET` odd,
 `REQUEST` = watch asks the phone to re-send (214/215/216, 251/252/253).
 
-Confirmed live 2026-09-06: command 251 answered `on = false` on a Beyond 3
-Pro. `protocol.encode_set_rapid_eye_movement_request()` and
+Both confirmed live on a Beyond 3 Pro, 2026-09-06: command 251 answered
+`on = false`, command 252 with `on = 1` answered with the bare `{1:252}` ack
+predicted above, and a fresh 251 on a new connection then returned
+`on = true`. `protocol.encode_set_rapid_eye_movement_request()` and
 `protocol.parse_rapid_eye_movement_response()` implement this;
 `zeblaze-ble rem`/`rem-set` expose it on the CLI.
 

@@ -80,7 +80,8 @@ CMD_SET_HEART_RATE_MONITOR = 215
 # "Turning on REM will greatly reduce battery runtime". Command ids and shape
 # from the same decompiled SDK (`ControlBleTools.getRapidEyeMovement` /
 # `setRapidEyeMovement`); 253 is watch-originated, asking the phone to push
-# the setting back. See protocol.md's "REM sleep tracking".
+# the setting back. 251 and 252 are confirmed live (2026-09-06). See
+# protocol.md's "REM sleep tracking".
 CMD_GET_RAPID_EYE_MOVEMENT_SETTING = 251
 CMD_SET_RAPID_EYE_MOVEMENT_SETTING = 252
 CMD_REQUEST_RAPID_EYE_MOVEMENT_SETTING = 253
