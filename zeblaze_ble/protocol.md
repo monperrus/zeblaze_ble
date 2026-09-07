@@ -774,6 +774,48 @@ set.
 `protocol.parse_heart_rate_monitor_response()` implement this shape;
 `zeblaze-ble hrmonitor`/`hrmonitor-set` expose it on the CLI.
 
+## REM sleep tracking
+
+Commands 251 (`GET_RAPID_EYE_MOVEMENT_SETTING`), 252
+(`SET_RAPID_EYE_MOVEMENT_SETTING`) and 253
+(`REQUEST_RAPID_EYE_MOVEMENT_SETTING`) carry the watch's REM sleep tracking.
+In the app this is one switch on its own screen -- "Rapid eye movement"
+(`sleep_rem_tips`), with "Turning on REM will greatly reduce battery runtime"
+(`sleep_bottom_tips`) printed under it -- handled by `SleepSettingActivity`
+through `ControlBleTools.getRapidEyeMovement`/`setRapidEyeMovement`. It is a
+separate command pair from the heart-rate monitor's 214/215, not a field of
+`SEHeartRateMonitor`, even though REM detection is what makes the optical
+heart-rate sensor run through the night.
+
+Command 251 takes no payload (`08 fb 01`). Command 252's request:
+
+```text
+{
+  1:252,
+  15:{             # SESettingMenu (envelope field 15)
+    15:{           # SERapidEyeMovement (SESettingMenu field 15)
+      1: on        # bool
+    }
+  }
+}
+```
+
+so `08 fc 01 7a 04 7a 02 08 01` turns it on and `...08 00` turns it off.
+Command 251's response carries the same nesting back; 252's is a bare ack --
+the SDK's dispatcher routes every `SET_*` id of this family to a branch that
+just stops a log timer, and only the `GET_*` ids to the branch that reads the
+bean, which is the same split observed live for 215.
+
+Command 253 is watch-originated: the SDK's dispatcher answers it with
+`deviceRefSetting`, i.e. the watch asking the phone to push this setting back
+to it. That is the general shape of this family -- `GET` even, `SET` odd,
+`REQUEST` = watch asks the phone to re-send (214/215/216, 251/252/253).
+
+Confirmed live 2026-09-06: command 251 answered `on = false` on a Beyond 3
+Pro. `protocol.encode_set_rapid_eye_movement_request()` and
+`protocol.parse_rapid_eye_movement_response()` implement this;
+`zeblaze-ble rem`/`rem-set` expose it on the CLI.
+
 ## Link security
 
 The Apricot protocol has no application-layer encryption, nonce, MAC, or

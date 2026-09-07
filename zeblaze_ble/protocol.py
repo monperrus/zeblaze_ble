@@ -75,6 +75,16 @@ CMD_SEND_APP_NOTIFICATION = 179
 CMD_GET_HEART_RATE_MONITOR = 214
 CMD_SET_HEART_RATE_MONITOR = 215
 
+# GET/SET/REQUEST_RAPID_EYE_MOVEMENT_SETTING -- the watch's REM sleep
+# tracking, exposed by the app as a single switch whose screen warns that
+# "Turning on REM will greatly reduce battery runtime". Command ids and shape
+# from the same decompiled SDK (`ControlBleTools.getRapidEyeMovement` /
+# `setRapidEyeMovement`); 253 is watch-originated, asking the phone to push
+# the setting back. See protocol.md's "REM sleep tracking".
+CMD_GET_RAPID_EYE_MOVEMENT_SETTING = 251
+CMD_SET_RAPID_EYE_MOVEMENT_SETTING = 252
+CMD_REQUEST_RAPID_EYE_MOVEMENT_SETTING = 253
+
 # SEHeartRateMonitor.SEMode -- inverted on the wire: ControlBleTools' encoder
 # maps HeartRateMonitorBean.mode == 0 to SEMode.AUTO (monitor on) and any
 # nonzero bean.mode to SEMode.OFF. These constants are that bean-side value,
@@ -134,6 +144,9 @@ COMMAND_NAMES = {
     CMD_SEND_APP_NOTIFICATION: "SEND_APP_NOTIFICATION",
     CMD_GET_HEART_RATE_MONITOR: "GET_HEART_RATE_MONITOR",
     CMD_SET_HEART_RATE_MONITOR: "SET_HEART_RATE_MONITOR",
+    CMD_GET_RAPID_EYE_MOVEMENT_SETTING: "GET_RAPID_EYE_MOVEMENT_SETTING",
+    CMD_SET_RAPID_EYE_MOVEMENT_SETTING: "SET_RAPID_EYE_MOVEMENT_SETTING",
+    CMD_REQUEST_RAPID_EYE_MOVEMENT_SETTING: "REQUEST_RAPID_EYE_MOVEMENT_SETTING",
 }
 
 # Low 2 bits of a sport-entry id's last byte (see SportEntryId below).
@@ -361,6 +374,39 @@ def parse_classic_bluetooth_status(payload: bytes) -> ClassicBluetoothStatus:
         radio_enabled=bool(_optional_int(status, 2)),
         mac=_bytes_field(status, 3).decode(errors="replace") if 3 in status else "",
     )
+
+
+def encode_set_rapid_eye_movement_request(enabled: bool) -> bytes:
+    """Build a SET_RAPID_EYE_MOVEMENT_SETTING (252) request.
+
+    Shape `{1:252, 15:{15:{1:on}}}`, from the official SDK's encoder
+    (`ControlBleTools.setRapidEyeMovement` -> `a.d(252, boolean)`, which fills
+    `SESettingMenu.rapid_eye_movement` = `SERapidEyeMovement{on}`). This is the
+    watch's REM sleep tracking, the setting the app itself warns "will greatly
+    reduce battery runtime" -- see protocol.md.
+    """
+    rapid_eye_movement = encode_field_varint(1, 1 if enabled else 0)
+    setting_menu = encode_field_bytes(15, rapid_eye_movement)
+    return encode_field_varint(1, CMD_SET_RAPID_EYE_MOVEMENT_SETTING) + encode_field_bytes(15, setting_menu)
+
+
+def parse_rapid_eye_movement_response(payload: bytes, command_id: int) -> bool | None:
+    """Parse a GET (251) or SET (252) rapid-eye-movement response.
+
+    Returns `None` when the watch answers with a bare ack carrying no bean --
+    which is what the SDK's own dispatcher expects of 252 (it routes the SET
+    ids to a branch that only stops a log timer, and only the GET ids to the
+    branch that reads the bean).
+    """
+    fields = decode_protobuf(payload)
+    if _int_field(fields, 1) != command_id:
+        raise ValueError(f"response is not for command {command_id}")
+    if 15 not in fields:
+        return None
+    setting_menu = decode_protobuf(_bytes_field(fields, 15))
+    if 15 not in setting_menu:
+        return None
+    return bool(_optional_int(decode_protobuf(_bytes_field(setting_menu, 15)), 1))
 
 
 def encode_time(year: int, month: int, day: int, hour: int = 0, minute: int = 0, second: int = 0) -> bytes:

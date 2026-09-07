@@ -458,6 +458,34 @@ async def request_heart_rate_monitor(address: str) -> protocol.HeartRateMonitorS
     return settings
 
 
+async def request_rapid_eye_movement(address: str) -> bool:
+    """Connect, send GET_RAPID_EYE_MOVEMENT_SETTING (251), and return whether REM tracking is on."""
+    async with GatttoolSession(address) as session:
+        await session.receive_pending_messages(grace_seconds=2.0)
+        await session.send_message(protocol.encode_request(protocol.CMD_GET_RAPID_EYE_MOVEMENT_SETTING))
+        payload = await session.receive_message()
+    enabled = protocol.parse_rapid_eye_movement_response(
+        payload, protocol.CMD_GET_RAPID_EYE_MOVEMENT_SETTING
+    )
+    if enabled is None:
+        raise ValueError("watch acknowledged command 251 without returning the setting")
+    return enabled
+
+
+async def set_rapid_eye_movement(address: str, enabled: bool) -> bool | None:
+    """Connect and send SET_RAPID_EYE_MOVEMENT_SETTING (252), enabling or disabling REM tracking.
+
+    Writes a user-visible device setting whose own settings screen warns that
+    turning it on greatly reduces the watch's battery runtime. Returns the
+    echoed setting, or None when the watch answers with a bare ack.
+    """
+    async with GatttoolSession(address) as session:
+        await session.receive_pending_messages(grace_seconds=2.0)
+        await session.send_message(protocol.encode_set_rapid_eye_movement_request(enabled))
+        payload = await session.receive_message()
+    return protocol.parse_rapid_eye_movement_response(payload, protocol.CMD_SET_RAPID_EYE_MOVEMENT_SETTING)
+
+
 async def set_heart_rate_monitor(
     address: str, settings: protocol.HeartRateMonitorSettings
 ) -> protocol.HeartRateMonitorSettings | None:

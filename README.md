@@ -273,6 +273,20 @@ the CLI reads back afterwards and reports the result under `stored`.
 }
 ```
 
+### REM sleep tracking
+
+```bash
+zeblaze-ble rem <ADDRESS> --i-understand-this-writes
+zeblaze-ble rem-set <ADDRESS> --on --i-understand-this-writes
+```
+
+Reads and writes the watch's REM sleep tracking (commands 251 and 252) — the
+app's "Rapid eye movement" switch, whose own screen warns that turning it on
+greatly reduces battery runtime, because REM detection keeps the optical
+heart-rate sensor running through the night. It is a separate setting from
+`hrmonitor`, not a field of it. The watch answers the write with a bare ack,
+so the CLI reads back and reports the result under `stored`.
+
 ### Watching every channel
 
 ```bash

@@ -20,10 +20,12 @@ from .gatttool_transport import (
     request_device_info,
     request_fitness_data,
     request_heart_rate_monitor,
+    request_rapid_eye_movement,
     request_workout_data,
     send_app_notification,
     send_notification,
     set_heart_rate_monitor,
+    set_rapid_eye_movement,
 )
 from .linux_gatt import inspect as inspect_gatttool
 
@@ -214,6 +216,24 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     hrmonitor_set_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    rem_command = commands.add_parser(
+        "rem",
+        help="read whether the watch's REM sleep tracking is on (performs a protocol write)",
+    )
+    rem_command.add_argument("address")
+    rem_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
+    rem_set_command = commands.add_parser(
+        "rem-set",
+        help=(
+            "turn the watch's REM sleep tracking on or off; the app's own screen warns that turning it "
+            "on greatly reduces battery runtime"
+        ),
+    )
+    rem_set_command.add_argument("address")
+    rem_state = rem_set_command.add_mutually_exclusive_group(required=True)
+    rem_state.add_argument("--on", dest="enabled", action="store_true")
+    rem_state.add_argument("--off", dest="enabled", action="store_false")
+    rem_set_command.add_argument("--i-understand-this-writes", action="store_true", required=True)
     return command_parser
 
 
@@ -413,6 +433,22 @@ async def run(arguments: argparse.Namespace) -> int:
                     "response": _jsonable(echo),
                     "stored": _jsonable(stored),
                 },
+                indent=2,
+            )
+        )
+        return 0
+
+    if arguments.command == "rem":
+        print(json.dumps({"rapid_eye_movement": await request_rapid_eye_movement(arguments.address)}, indent=2))
+        return 0
+
+    if arguments.command == "rem-set":
+        echo = await set_rapid_eye_movement(arguments.address, arguments.enabled)
+        # 252 answers with a bare ack, so read the setting back to report what stuck.
+        stored = await request_rapid_eye_movement(arguments.address)
+        print(
+            json.dumps(
+                {"requested": arguments.enabled, "response": echo, "stored": stored},
                 indent=2,
             )
         )

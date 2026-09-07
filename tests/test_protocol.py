@@ -292,6 +292,26 @@ def test_heart_rate_monitor_request_round_trips_through_parse() -> None:
     )
 
 
+def test_encode_set_rapid_eye_movement_matches_the_sdk_shape() -> None:
+    # {1:252, 15:{15:{1:1}}} -- SESettingMenu.rapid_eye_movement is field 15,
+    # SERapidEyeMovement.on is field 1.
+    assert protocol.encode_set_rapid_eye_movement_request(True) == bytes.fromhex("08fc017a047a020801")
+    assert protocol.encode_set_rapid_eye_movement_request(False) == bytes.fromhex("08fc017a047a020800")
+
+
+def test_rapid_eye_movement_round_trips_and_tolerates_a_bare_ack() -> None:
+    encoded = protocol.encode_set_rapid_eye_movement_request(True)
+    assert protocol.parse_rapid_eye_movement_response(
+        encoded, protocol.CMD_SET_RAPID_EYE_MOVEMENT_SETTING
+    )
+    assert (
+        protocol.parse_rapid_eye_movement_response(
+            bytes.fromhex("08fc01"), protocol.CMD_SET_RAPID_EYE_MOVEMENT_SETTING
+        )
+        is None
+    )
+
+
 def test_classic_bluetooth_status_parses_the_watch_announcement() -> None:
     # Captured 2026-09-06: command 27, pushed by the watch shortly after every
     # connection. Classic radio on, nothing connected to it.
