@@ -1,7 +1,9 @@
-# Zeblaze Beyond 3 Pro protocol
+# Apricot protocol
 
-This document describes the Apricot protocol used by the Zeblaze Beyond 3
-Pro. It is a wire-format reference for implementations.
+A wire-format reference for the Apricot protocol: its GATT service, chunked
+transport, command ids, and message layouts. Format facts only -- how any of
+it was established, and how a given device behaves, belong in `NOTES.md` and
+`JOURNAL.md`.
 
 ## GATT service
 
@@ -22,7 +24,8 @@ Descriptor (CCCD) enables notifications from that characteristic for the
 current connection. `6f02` notifications carry transport acknowledgements;
 `6f01` notifications carry command responses and watch-originated messages.
 The other three subscriptions are needed only for traffic assigned to their
-respective channels. These handles apply to firmware `1.1.2`.
+respective channels. The handles above are firmware-specific; the UUIDs are
+the stable identifiers.
 
 ## Session initialization and MTU
 
@@ -259,46 +262,6 @@ supported language list. Command 164 enables real-time reports:
 
 The watch answers command 164 by pushing command 165.
 
-### Classic-radio status announcement: command 27
-
-Command 27 is `REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS`
-(`WearProtos.SEWear.SEFunctionId`). It is watch-originated and reports the
-state of the watch's *classic* (BR/EDR) radio, not its BLE link:
-
-```text
-08 1b 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
-```
-
-Shape `{1:27, 3:{8:{1:connect_status, 2:switch, 3:mac}}}` -- envelope field 3
-is `SEBindAccount`, its field 8 is `classic_bluetooth_status`
-(`SEClassicBluetoothStatus`), whose fields the SDK surfaces as
-`ClassicBleStatusBean{isConnect, isSwitch, mac}` through
-`RequestClassicBleConnectStatusCallBack.onConnectState`:
-
-| Field | Name | Meaning |
-| --- | --- | --- |
-| 1 | `inquiry_classic_bluetooth_connect_status` | bool: a classic connection is up |
-| 2 | `inquiry_classic_bluetooth_switch` | bool: the classic radio is enabled |
-| 3 | `inquiry_classic_bluetooth_mac` | the watch's classic BR/EDR address, as text |
-
-The capture above therefore reads: classic radio on, nothing connected to it,
-classic address `D6:45:15:30:04:71` -- the same address as this watch's BLE
-one.
-
-The watch emits this unprompted a second or two after **every** connection,
-not only after a bind (observed live 2026-09-06 on a long-bound watch with
-`scripts/watch_monitor.py`). It is a status announcement, not a question: no
-application-level reply exists for it. The phone never sends 27 either --
-the official SDK's only outbound use of the number is an unrelated Berry-
-protocol subcommand, and there is no Apricot encoder for it.
-
-Do not synthesize command 27 from the host. Receive and acknowledge it using
-the normal chunked transport when it is emitted. The watch waits for that
-transport acknowledgement before serving later application messages, so
-clients must not discard notifications received on another characteristic
-while awaiting a command ACK -- a command written before command 27 is
-acknowledged simply goes unanswered.
-
 ### User verification: command 19
 
 Request for user `2011999`:
@@ -331,23 +294,38 @@ system bond is separate from protocol-level unbinding.
 
 ## Classic Bluetooth status
 
-Commands 25 and 27 carry `SEClassicBluetoothStatus` in envelope field 8:
+Commands 25 and 27 carry `SEClassicBluetoothStatus`, nested as
+`{3:{8:{...}}}`: envelope field 3 is `SEBindAccount` and its field 8 is
+`classic_bluetooth_status`. Command 27 is
+`REQUEST_CLASSIC_BLUETOOTH_CONNECT_STATUS` in
+`WearProtos.SEWear.SEFunctionId`. The bean's fields:
 
-| Field | Meaning |
-| ---: | --- |
-| 1 | Classic link connected |
-| 2 | Classic radio enabled |
-| 3 | Watch classic MAC address |
+| Field | Name | Meaning |
+| ---: | --- | --- |
+| 1 | `inquiry_classic_bluetooth_connect_status` | bool: a classic link is connected |
+| 2 | `inquiry_classic_bluetooth_switch` | bool: the classic radio is enabled |
+| 3 | `inquiry_classic_bluetooth_mac` | classic BR/EDR address, as text |
 
 Command 25 queries the state:
 
 ```text
 -> 08 19
-<- 08 19 1a 19 42 17 08 00 10 01 1a 11 "D6:45:15:30:04:71"
+<- 08 19 1a 19 42 17 08 00 10 01 1a 11 "AA:BB:CC:DD:EE:FF"
 ```
 
-Command 27 is the watch-originated form. A false first field and true second
-field means that the classic radio is enabled with no classic link connected.
+A false first field with a true second field means the classic radio is
+enabled with no classic link connected. The classic address may equal the
+device's BLE address.
+
+Command 27 is the watch-originated form, reporting the classic radio rather
+than the BLE link. The watch emits it unprompted a second or two after every
+connection, bound or not. It is an announcement, not a question: no
+application-level reply exists for it, and the host never sends command 27.
+It must still be received and acknowledged through the normal chunked
+transport. Until that transport acknowledgement is sent, the watch serves no
+further application messages -- a command written first simply goes
+unanswered -- so a client must not discard notifications arriving on another
+characteristic while awaiting a command ACK.
 
 Classic Bluetooth and HFP are not required for command 179 after application
 binding. Notification content travels over BLE.
@@ -489,9 +467,9 @@ EventInfo {
 ```
 
 Command 212 replaces the complete reminder list and returns generic success.
-Command 211 returns the stored list and maximum list size. This watch reports
-a maximum of five reminders. Reminders fire locally from the watch clock at
-minute granularity.
+Command 211 returns the stored list and the maximum list size, which is
+firmware-defined rather than fixed by the protocol. Reminders fire locally
+from the watch clock at minute granularity.
 
 ## Fitness data
 
@@ -700,18 +678,8 @@ Command 249 is a watch-originated request to refresh screen settings.
 ## Heart-rate monitor settings
 
 Commands 214 (`GET_HEART_RATE_MONITOR`) and 215 (`SET_HEART_RATE_MONITOR`)
-read and write the app's "Heart Rate Monitor" setting screen, including its
-"Continuous Heart Monitoring" toggle. This section's shape and field numbers
-were first read directly from the official ZH_SDK Android SDK
-(`ZH_SDK_20250808_V2.2.0.aar`, obtained from
-[jagatheeswaran-noise/noise-ai-ble-smartwatch](https://github.com/jagatheeswaran-noise/noise-ai-ble-smartwatch),
-decompiled with jadx): `com.zhapp.ble.ControlBleTools#getHeartRateMonitor`/
-`#setHeartRateMonitor`, its private encoder `a#a(int, HeartRateMonitorBean)`,
-and the generated `com.zh.ble.wear.protobuf.{WearProtos,SettingMenuProtos}`
-field-number constants. Both commands are now confirmed against a live
-Beyond 3 Pro (2026-09-06): 214 returned the bean under the nesting below, and
-215 changed the setting, the change surviving a fresh 214 read on a new
-connection.
+read and write the heart-rate monitor settings, including the
+continuous-monitoring switch.
 
 Command 214 takes no payload (`08 d6 01`). Command 215's request:
 
@@ -732,44 +700,41 @@ Command 214 takes no payload (`08 d6 01`). Command 215's request:
 }
 ```
 
-**`mode` is the app's "Continuous Heart Monitoring" toggle**, and it is the
-field that decides whether the watch samples at all. The Zeblaze Fit app's
-`HeartRateSettingActivity` binds its `chbContinuousHeartHare` switch straight
-to this field, inverted both ways: it renders the switch as
-`setChecked(mode == 0)` and saves it as `mode = !checked`. Confirmed live
-2026-09-06: with `mode` 1 the watch's continuous-heart-rate buckets were
-empty apart from a stray sample a day; the moment `mode` 0 was written, they
-filled at one sample per 5 minutes with no gaps.
+`mode` is the continuous-monitoring switch, and the field that decides
+whether the watch samples at all: `AUTO` samples on a schedule, `OFF`
+disables the monitor. The app's own heart-rate settings screen binds its
+switch straight to this field, inverted both ways -- checked means bean value
+0.
 
-`continuous_heart_rate_mode` -- `ALL_DAY_HEART_RATE` (0) vs.
-`INTELLIGENT_HEART_RATE` (1), nominally a fixed clock vs. movement-triggered
-sampling -- is **not** what that toggle writes, despite the name. This app's
-heart-rate settings screen never touches the field, and this watch reported 0
-even while it was sampling nothing, so its practical effect here is unknown.
+`continuous_heart_rate_mode` distinguishes `ALL_DAY_HEART_RATE` (0), sampling
+on a fixed clock, from `INTELLIGENT_HEART_RATE` (1), sampling sparsely on
+movement. It is not the continuous-monitoring switch, despite the name: the
+app's settings screen never writes this field, and a device can report
+`ALL_DAY_HEART_RATE` while `mode` is `OFF` and nothing is sampled.
 
-`frequency` is inert on this watch. The app hard-codes it to 0 on every save
-(`iput v1` with `const/4 v1, 0x0`), and the watch reports 5 regardless:
-writing 1 was accepted and read back as 5 (tested live 2026-09-06). The
-5-minute cadence looks firmware-fixed, and the observed data matches it.
+`frequency_minutes` is the sampling interval in minutes. The app hard-codes
+it to 0 on every write, so firmware may ignore the field and keep a built-in
+interval; a client cannot assume a written value is honoured, and should read
+back the effective one.
 
 Command 215 is a full-replace write, not a patch on individual fields, so a
 client should read back current settings with command 214 first and only
-change the field(s) it means to change.
+change the field(s) it means to change. Writing `warning_value` while
+`warning` is false does not necessarily store the value.
 
 Command 214's response uses the same field-15 -> field-3 nesting as the
-command 215 request above. It omits zero-valued fields the way proto3
-does, so a reply can stop short of field 7 (`08 d6 01 7a 0a 1a 08 08 00 10
-05 18 00 20 00` is a real one: mode 0, frequency 5, everything else
-default). Field 8 (`low_warning_value`) has not been seen.
-Command 215's own response is a bare
-`{1:215}` ack with no field 15, so a client that wants to see what was
-stored must re-read with 214 rather than parse the reply. Observed live: a
-watch with monitoring off answers 214 with `mode` 1 and
-`continuous_heart_rate_mode` 0; after a 215 write of `mode` 0 the next 214
-read returns `mode` 0. The watch also zeroed `warning_value` (130 -> 0) on
-that write, with `warning` false in both the read-back and the written
-request -- so `warning_value` appears to be kept only while `warning` is
-set.
+command 215 request above, and omits zero-valued fields the way proto3 does,
+so a reply can stop short of field 7:
+
+```text
+08 d6 01 7a 0a 1a 08 08 00 10 05 18 00 20 00   # mode 0, frequency 5, rest default
+```
+
+Field 8 (`low_warning_value`) exists in the bean but is not sent. Command
+215's own response is a bare `{1:215}` ack with no field 15, so a client that
+wants to see what was stored must re-read with 214 rather than parse the
+reply.
+
 `protocol.encode_set_heart_rate_monitor_request()` and
 `protocol.parse_heart_rate_monitor_response()` implement this shape;
 `zeblaze-ble hrmonitor`/`hrmonitor-set` expose it on the CLI.
@@ -778,14 +743,12 @@ set.
 
 Commands 251 (`GET_RAPID_EYE_MOVEMENT_SETTING`), 252
 (`SET_RAPID_EYE_MOVEMENT_SETTING`) and 253
-(`REQUEST_RAPID_EYE_MOVEMENT_SETTING`) carry the watch's REM sleep tracking.
-In the app this is one switch on its own screen -- "Rapid eye movement"
-(`sleep_rem_tips`), with "Turning on REM will greatly reduce battery runtime"
-(`sleep_bottom_tips`) printed under it -- handled by `SleepSettingActivity`
-through `ControlBleTools.getRapidEyeMovement`/`setRapidEyeMovement`. It is a
-separate command pair from the heart-rate monitor's 214/215, not a field of
-`SEHeartRateMonitor`, even though REM detection is what makes the optical
-heart-rate sensor run through the night.
+(`REQUEST_RAPID_EYE_MOVEMENT_SETTING`) carry REM sleep tracking, a single
+boolean. It is a separate command family from the heart-rate monitor's
+214/215, not a field of `SEHeartRateMonitor`, although REM staging is what
+keeps the optical heart-rate sensor running overnight -- the app labels the
+switch "Rapid eye movement" and warns that enabling it greatly reduces
+battery runtime.
 
 Command 251 takes no payload (`08 fb 01`). Command 252's request:
 
@@ -801,20 +764,17 @@ Command 251 takes no payload (`08 fb 01`). Command 252's request:
 ```
 
 so `08 fc 01 7a 04 7a 02 08 01` turns it on and `...08 00` turns it off.
-Command 251's response carries the same nesting back; 252's is a bare ack --
-the SDK's dispatcher routes every `SET_*` id of this family to a branch that
-just stops a log timer, and only the `GET_*` ids to the branch that reads the
-bean, which is the same split observed live for 215.
+Command 251's response carries the same nesting back. Command 252's is a bare
+`{1:252}` ack with no field 15, so a client must re-read with 251 to see what
+was stored.
 
-Command 253 is watch-originated: the SDK's dispatcher answers it with
-`deviceRefSetting`, i.e. the watch asking the phone to push this setting back
-to it. That is the general shape of this family -- `GET` even, `SET` odd,
-`REQUEST` = watch asks the phone to re-send (214/215/216, 251/252/253).
+Command 253 is watch-originated: it asks the host to push this setting back
+to the watch. That is the general shape of these setting families -- `GET`
+even, `SET` odd, `REQUEST` watch-originated (214/215/216, 251/252/253) --
+and only the `GET` id answers with the bean; the `SET` id answers with a bare
+ack.
 
-Both confirmed live on a Beyond 3 Pro, 2026-09-06: command 251 answered
-`on = false`, command 252 with `on = 1` answered with the bare `{1:252}` ack
-predicted above, and a fresh 251 on a new connection then returned
-`on = true`. `protocol.encode_set_rapid_eye_movement_request()` and
+`protocol.encode_set_rapid_eye_movement_request()` and
 `protocol.parse_rapid_eye_movement_response()` implement this;
 `zeblaze-ble rem`/`rem-set` expose it on the CLI.
 
