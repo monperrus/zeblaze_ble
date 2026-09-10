@@ -11,12 +11,40 @@ instead of bleak, using the fixed handles observed for this watch's firmware.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import ctypes
 import datetime as dt
 import re
+import signal
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
 from . import protocol
+
+# Loaded at import time, not inside the preexec hook: the hook runs after
+# fork(), where allocating and dlopen()ing is unsafe in a threaded process.
+try:
+    _LIBC: ctypes.CDLL | None = ctypes.CDLL("libc.so.6", use_errno=True)
+except OSError:  # pragma: no cover - non-glibc host
+    _LIBC = None
+
+_PR_SET_PDEATHSIG = 1
+
+
+def _die_with_parent() -> None:  # pragma: no cover - runs in the forked child
+    """Ask the kernel to SIGKILL this child once its parent dies.
+
+    A gatttool that outlives its Python parent (harness/`timeout` kill,
+    SIGKILL, closed terminal) never receives the `exit` command from
+    :meth:`GatttoolSession.__aexit__`. Its stdin pipe then hits EOF, and its
+    GLib main loop busy-polls that dead fd forever: observed live on
+    2026-09-09 as an orphaned `gatttool -I -b ... -l low` burning a full core
+    for 22 hours, which also keeps the LE link claimed so every later session
+    is refused as busy. PDEATHSIG survives the exec of `gatttool` by `stdbuf`,
+    so the kernel reaps the orphan even when this process dies uncleanly.
+    """
+    if _LIBC is not None:
+        _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGKILL)
 
 # Fixed ATT handles for this watch's firmware (from `zeblaze-ble inspect --backend gatttool`).
 _READ_VALUE_HANDLE = 0x0021  # 16186f01 characteristic value
@@ -146,6 +174,7 @@ class GatttoolSession:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            preexec_fn=_die_with_parent,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         try:
@@ -204,22 +233,36 @@ class GatttoolSession:
         return self
 
     async def __aexit__(self, *_exc_info: object) -> None:
-        if self._process is not None and self._process.returncode is None:
+        process = self._process
+        if process is not None and process.returncode is None:
             try:
                 # `exit` alone can leave BlueZ holding the ACL connection for
                 # a while. Explicitly release it so the next command can
                 # connect without a manual `bluetoothctl disconnect`.
                 await self._send_line("disconnect")
                 await self._wait_for_any(("Disconnected", "Connection terminated"), timeout_seconds=2)
-            except (TimeoutError, asyncio.TimeoutError):
+            except Exception:
+                # A dead or wedged gatttool makes both the write and the wait
+                # fail (BrokenPipeError, TimeoutError); the kill below is the
+                # backstop, so nothing here is worth propagating.
                 pass
             try:
                 await self._send_line("exit")
-                await asyncio.wait_for(self._process.wait(), timeout=5)
+                await asyncio.wait_for(process.wait(), timeout=5)
             except Exception:
-                self._process.kill()
+                pass
+            # `exit` is only advisory: a gatttool stuck in its GLib loop never
+            # acts on it, and a survivor spins at 100% CPU on its stdin pipe
+            # forever (see _die_with_parent). Never leave one behind, and
+            # always reap it so it cannot linger as a zombie either.
+            if process.returncode is None:
+                process.kill()
+                with contextlib.suppress(TimeoutError, asyncio.TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=5)
         if self._reader_task is not None:
             self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._reader_task
         await _disconnect_local_bluez(self._address)
 
     async def _read_loop(self) -> None:
